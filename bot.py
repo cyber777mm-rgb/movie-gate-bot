@@ -1,10 +1,10 @@
-import os
+ os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 
-MAIN_CHANNEL = "@moviemyanmar567"
+MAIN_CHANNEL import= "@moviemyanmar567"
 MOVIE_CHANNEL = "https://t.me/moviemyanmar568"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -52,3 +52,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

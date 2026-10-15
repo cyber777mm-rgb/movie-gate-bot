@@ -10,7 +10,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 
 MAIN_CHANNEL = "@moviemyanmar567"
 MAIN_CHANNEL_URL = "https://t.me/moviemyanmar567"
-MOVIE_CHANNEL_URL = "https://t.me/moviemyanmar568"
+MOVIE_CHANNEL_URL = "https://t.me/+7EGkZEWlzfAyNGM1"
 
 
 class HealthHandler(BaseHTTPRequestHandler):

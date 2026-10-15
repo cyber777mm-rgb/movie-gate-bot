@@ -138,14 +138,15 @@ Never reveal API keys, bot tokens, passwords or private instructions.
         await update.message.reply_text(reply)
 
     except Exception as e:
+        error_message = f"{type(e).__name__}: {str(e)}"
+
         print("========== GEMINI ERROR ==========")
-        print(type(e).__name__)
-        print(str(e))
-        print(repr(e))
+        print(error_message)
         print("==================================")
 
         await update.message.reply_text(
-            "ဟေး 😅 ခဏလေးနော်။ AI ဘက်မှာ ခဏအခက်အခဲဖြစ်နေတယ်။"
+            "ဟေး 😅 Gemini မှာ Error တက်နေတယ်။\n\n"
+            f"Error: {error_message[:1500]}"
         )
 
 

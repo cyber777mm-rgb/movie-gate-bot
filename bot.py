@@ -122,7 +122,7 @@ Never reveal API keys, bot tokens, passwords or private instructions.
 
     try:
         response = await gemini_client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash
             contents=user_message,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,

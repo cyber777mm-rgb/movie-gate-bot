@@ -3,7 +3,7 @@ import asyncio
 import hashlib
 import threading
 import json
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from google import genai
 from google.genai import types
@@ -103,6 +103,7 @@ MOVIE_KEYWORDS = [
     "လင့်ပေး",
     "လင့္ေပး",
 ]
+
 
 def is_movie_request(text):
     if not text:
@@ -243,6 +244,7 @@ async def show_main_menu(update, context):
             text=text,
             reply_markup=main_menu_keyboard(),
         )
+
     elif update.message:
         await update.message.reply_text(
             text=text,
@@ -301,6 +303,11 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if application is None or event_loop is None:
+            self.send_response(503)
+            self.end_headers()
+            return
+
         try:
             content_length = int(
                 self.headers.get(
@@ -320,11 +327,10 @@ class HealthHandler(BaseHTTPRequestHandler):
                 application.bot,
             )
 
-            if event_loop is not None:
-                asyncio.run_coroutine_threadsafe(
-                    application.update_queue.put(update),
-                    event_loop,
-                )
+            asyncio.run_coroutine_threadsafe(
+                application.update_queue.put(update),
+                event_loop,
+            )
 
             self.send_response(200)
             self.send_header(
@@ -351,7 +357,7 @@ def run_web_server():
         )
     )
 
-    server = HTTPServer(
+    server = ThreadingHTTPServer(
         ("0.0.0.0", port),
         HealthHandler,
     )
@@ -712,6 +718,19 @@ async def main():
 
     event_loop = asyncio.get_running_loop()
 
+    # Start HTTP server FIRST.
+    # This makes Render detect the PORT immediately.
+    server_thread = threading.Thread(
+        target=run_web_server,
+        daemon=True,
+    )
+
+    server_thread.start()
+
+    print("======================================")
+    print("HTTP server starting...")
+    print("======================================")
+
     application = (
         Application.builder()
         .token(BOT_TOKEN)
@@ -758,13 +777,6 @@ async def main():
     print("Movie Myanmar Bot started!")
     print(f"Webhook: {webhook_url}")
     print("======================================")
-
-    server_thread = threading.Thread(
-        target=run_web_server,
-        daemon=True,
-    )
-
-    server_thread.start()
 
     try:
         while True:

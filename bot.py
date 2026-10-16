@@ -40,6 +40,22 @@ WEBHOOK_SECRET = hashlib.sha256(
 ).hexdigest()[:32]
 
 # =========================
+# STICKER IDs
+# =========================
+
+SLAP_STICKER_ID = (
+    "CAACAgUAAxkBAAOKatIKZED6Z7w1Rc35vlMHSyCv8IQAAgYcAAJLd6lXJrpKjRqPHfM9BA"
+)
+
+SECOND_STICKER_ID = (
+    "CAACAgUAAxkBAAOLatIKrrZ5UGKd3ce5l5FbA1p8YO8AAtAXAALs76hX2aWY1l_EUxE9BA"
+)
+
+TONGUE_STICKER_ID = (
+    "CAACAgUAAxkBAAOVatIdX07G_2IAAWLl7AABRasK_UlJHwACWhgAAutFoFe_7dF5-2-ZLj0E"
+)
+
+# =========================
 # GEMINI
 # =========================
 
@@ -321,38 +337,84 @@ async def start(
         )
 
 # =========================
-# STICKER ID
+# REACTION SYSTEM
 # =========================
 
-async def sticker_id(
+async def handle_reactions(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    text: str
 ):
 
     if not update.message:
-        return
+        return False
 
-    sticker = update.message.sticker
+    message = text.lower().strip()
 
-    if not sticker:
-        return
+    # =========================
+    # ဟဲ့ကောင်မ
+    # =========================
 
-    file_id = sticker.file_id
-    unique_id = sticker.file_unique_id
+    if (
+        "ဟဲ့ကောင်မ" in message
+        or "ဟဲ့ ကောင်မ" in message
+        or "ဟေးကောင်မ" in message
+        or "ဟေး ကောင်မ" in message
+    ):
 
-    print("========== STICKER ID ==========")
-    print("FILE ID:")
-    print(file_id)
-    print("FILE UNIQUE ID:")
-    print(unique_id)
-    print("================================")
+        await update.message.reply_sticker(
+            sticker=SLAP_STICKER_ID
+        )
 
-    await update.message.reply_text(
-        "🎯 ဒီ Sticker ရဲ့ FILE ID က:\n\n"
-        f"`{file_id}`\n\n"
-        "အပေါ်က ID ကို copy လုပ်ထားနော် 😄",
-        parse_mode="Markdown"
-    )
+        return True
+
+    # =========================
+    # မသာမ
+    # =========================
+
+    if (
+        "မသာမ" in message
+        or "မသာ မ" in message
+    ):
+
+        await update.message.reply_sticker(
+            sticker=SECOND_STICKER_ID
+        )
+
+        return True
+
+    # =========================
+    # ရိုင်းတာ / စွာတာ
+    # =========================
+
+    rude_phrases = [
+        "နင်ဘာလို့ ရိုင်းနေတာလည်း",
+        "နင်ဘာလို့ရိုင်းနေတာလည်း",
+        "ဘာလို့ ရိုင်းနေတာလည်း",
+        "ဘာလို့ရိုင်းနေတာလည်း",
+        "ရိုင်းလိုက်တာ",
+        "ရိုင်းတာ",
+        "စွာလိုက်တာ",
+        "စွာနေတာ",
+    ]
+
+    if any(
+        phrase in message
+        for phrase in rude_phrases
+    ):
+
+        await update.message.reply_text(
+            "ရိုင်းနေတာမဟုတ်ဘူးနော် 😏\n\n"
+            "ကိုကိုလင်းမြတ်က သင်ထားတာ… "
+            "လိုအပ်ရင် စွာရမယ်၊ ပါးချရမယ်တဲ့ 🤭"
+        )
+
+        await update.message.reply_sticker(
+            sticker=TONGUE_STICKER_ID
+        )
+
+        return True
+
+    return False
 
 # =========================
 # GEMINI CHAT
@@ -369,6 +431,16 @@ async def ai_chat(
     user_message = update.message.text
 
     if not user_message:
+        return
+
+    # =========================
+    # REACTION SYSTEM
+    # =========================
+
+    if await handle_reactions(
+        update,
+        user_message
+    ):
         return
 
     # =========================
@@ -474,14 +546,6 @@ async def main():
         CommandHandler(
             "start",
             start
-        )
-    )
-
-    # STICKER
-    application.add_handler(
-        MessageHandler(
-            filters.Sticker.ALL,
-            sticker_id
         )
     )
 

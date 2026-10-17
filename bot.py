@@ -47,7 +47,9 @@ if GEMINI_API_KEY:
         gemini_client = genai.Client(
             api_key=GEMINI_API_KEY
         )
-    except Exception:
+        print("Gemini client initialized.")
+    except Exception as error:
+        print("Gemini client error:", error)
         gemini_client = None
 
 # =========================================================
@@ -56,6 +58,7 @@ if GEMINI_API_KEY:
 
 telegram_application = None
 main_loop = None
+http_server = None
 
 # =========================================================
 # KEYBOARDS
@@ -169,10 +172,7 @@ async def is_member(bot, user_id):
         )
 
     except Exception as error:
-        print(
-            "Membership check error:",
-            error,
-        )
+        print("Membership check error:", error)
         return False
 
 # =========================================================
@@ -207,9 +207,7 @@ async def show_main_menu(
 # RENDER HEALTH SERVER + TELEGRAM WEBHOOK
 # =========================================================
 
-class HealthHandler(
-    BaseHTTPRequestHandler
-):
+class HealthHandler(BaseHTTPRequestHandler):
 
     def log_message(
         self,
@@ -225,9 +223,7 @@ class HealthHandler(
             "/health",
         ):
 
-            body = (
-                b"Movie Myanmar bot is running."
-            )
+            body = b"Movie Myanmar bot is running."
 
             self.send_response(200)
 
@@ -257,11 +253,9 @@ class HealthHandler(
             self.end_headers()
             return
 
-        incoming_secret = (
-            self.headers.get(
-                "X-Telegram-Bot-Api-Secret-Token",
-                "",
-            )
+        incoming_secret = self.headers.get(
+            "X-Telegram-Bot-Api-Secret-Token",
+            "",
         )
 
         if incoming_secret != WEBHOOK_SECRET:
@@ -304,7 +298,6 @@ class HealthHandler(
 
             self.send_response(200)
             self.end_headers()
-
             self.wfile.write(b"OK")
 
         except Exception as error:
@@ -320,6 +313,8 @@ class HealthHandler(
 
 def start_http_server():
 
+    global http_server
+
     port = int(
         os.getenv(
             "PORT",
@@ -327,7 +322,7 @@ def start_http_server():
         )
     )
 
-    server = HTTPServer(
+    http_server = HTTPServer(
         (
             "0.0.0.0",
             port,
@@ -336,7 +331,7 @@ def start_http_server():
     )
 
     thread = threading.Thread(
-        target=server.serve_forever,
+        target=http_server.serve_forever,
         daemon=True,
     )
 
@@ -356,9 +351,7 @@ async def start(
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    user_id = (
-        update.effective_user.id
-    )
+    user_id = update.effective_user.id
 
     if await is_member(
         context.bot,
@@ -395,9 +388,7 @@ async def button_handler(
 
     await query.answer()
 
-    user_id = (
-        update.effective_user.id
-    )
+    user_id = update.effective_user.id
 
     data = query.data
 
@@ -735,9 +726,7 @@ async def message_handler(
     if not update.message.text:
         return
 
-    user_id = (
-        update.effective_user.id
-    )
+    user_id = update.effective_user.id
 
     text = update.message.text.strip()
 
@@ -856,8 +845,11 @@ async def main():
     global telegram_application
     global main_loop
 
-    if not BOT_TOKEN:
+    print("========================================")
+    print("Movie Myanmar Bot starting...")
+    print("========================================")
 
+    if not BOT_TOKEN:
         raise RuntimeError(
             "BOT_TOKEN is missing"
         )
@@ -866,12 +858,20 @@ async def main():
         asyncio.get_running_loop()
     )
 
+    # -----------------------------------------------------
+    # CREATE TELEGRAM APPLICATION
+    # -----------------------------------------------------
+
     telegram_application = (
         Application.builder()
         .token(BOT_TOKEN)
         .updater(None)
         .build()
     )
+
+    # -----------------------------------------------------
+    # HANDLERS
+    # -----------------------------------------------------
 
     telegram_application.add_handler(
         CommandHandler(
@@ -881,28 +881,4 @@ async def main():
     )
 
     telegram_application.add_handler(
-        CallbackQueryHandler(
-            button_handler
-        )
-    )
-
-    telegram_application.add_handler(
-        MessageHandler(
-            filters.TEXT
-            & ~filters.COMMAND,
-            message_handler,
-        )
-    )
-
-    await telegram_application.initialize()
-
-    await telegram_application.start()
-
-    start_http_server()
-
-    webhook_url = (
-        f"{RENDER_URL}"
-        f"{WEBHOOK_PATH}"
-    )
-
-    await telegram_application.bot.se
+        CallbackQueryHandler

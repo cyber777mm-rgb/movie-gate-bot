@@ -16,178 +16,82 @@ from telegram.ext import (
     filters,
 )
 
-# =========================================================
-# CONFIG
-# =========================================================
-
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 MAIN_CHANNEL = "@moviemyanmar567"
 MOVIE_CHANNEL_URL = "https://t.me/+7EGkZEWlzfAyNGM1"
 RENDER_URL = "https://movie-gate-bot.onrender.com"
-
 WEBHOOK_PATH = "/telegram-webhook"
 
-if BOT_TOKEN:
-    WEBHOOK_SECRET = hashlib.sha256(
-        BOT_TOKEN.encode("utf-8")
-    ).hexdigest()[:32]
-else:
-    WEBHOOK_SECRET = ""
-
-# =========================================================
-# GEMINI
-# =========================================================
+WEBHOOK_SECRET = (
+    hashlib.sha256(BOT_TOKEN.encode("utf-8")).hexdigest()[:32]
+    if BOT_TOKEN else ""
+)
 
 gemini_client = None
 
 if GEMINI_API_KEY:
     try:
-        gemini_client = genai.Client(
-            api_key=GEMINI_API_KEY
-        )
+        gemini_client = genai.Client(api_key=GEMINI_API_KEY)
         print("Gemini client initialized.")
     except Exception as error:
-        print("Gemini client error:", error)
-        gemini_client = None
-
-# =========================================================
-# GLOBALS
-# =========================================================
+        print("Gemini client error:", repr(error))
 
 telegram_application = None
 main_loop = None
-http_server = None
 
-# =========================================================
-# KEYBOARDS
-# =========================================================
 
 def movie_keyboard():
-    return InlineKeyboardMarkup(
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎬 ဇာတ်ကားကြည့်ရန်", callback_data="movies")],
         [
-            [
-                InlineKeyboardButton(
-                    "🎬 ဇာတ်ကားကြည့်ရန်",
-                    callback_data="movies",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔎 ဇာတ်ကားရှာမယ်",
-                    callback_data="search_movie",
-                ),
-                InlineKeyboardButton(
-                    "📂 အမျိုးအစား",
-                    callback_data="categories",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "💬 AI နဲ့စကားပြောမယ်",
-                    callback_data="ai_chat",
-                )
-            ],
-        ]
-    )
+            InlineKeyboardButton("🔎 ဇာတ်ကားရှာမယ်", callback_data="search_movie"),
+            InlineKeyboardButton("📂 အမျိုးအစား", callback_data="categories"),
+        ],
+        [InlineKeyboardButton("💬 AI နဲ့စကားပြောမယ်", callback_data="ai_chat")],
+    ])
 
 
 def join_keyboard():
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "📢 Movie Channel ဝင်မယ်",
-                    url=MOVIE_CHANNEL_URL,
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "✅ ဝင်ပြီးပြီ စစ်မယ်",
-                    callback_data="check_membership",
-                )
-            ],
-        ]
-    )
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Movie Channel ဝင်မယ်", url=MOVIE_CHANNEL_URL)],
+        [InlineKeyboardButton("✅ ဝင်ပြီးပြီ စစ်မယ်", callback_data="check_membership")],
+    ])
 
 
 def category_keyboard():
-    return InlineKeyboardMarkup(
+    return InlineKeyboardMarkup([
         [
-            [
-                InlineKeyboardButton(
-                    "💥 Action",
-                    callback_data="cat_action",
-                ),
-                InlineKeyboardButton(
-                    "😂 Comedy",
-                    callback_data="cat_comedy",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "❤️ Romance",
-                    callback_data="cat_romance",
-                ),
-                InlineKeyboardButton(
-                    "👻 Horror",
-                    callback_data="cat_horror",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔪 Thriller",
-                    callback_data="cat_thriller",
-                ),
-                InlineKeyboardButton(
-                    "🎭 Drama",
-                    callback_data="cat_drama",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "⬅️ Main Menu",
-                    callback_data="main_menu",
-                )
-            ],
-        ]
-    )
+            InlineKeyboardButton("💥 Action", callback_data="cat_action"),
+            InlineKeyboardButton("😂 Comedy", callback_data="cat_comedy"),
+        ],
+        [
+            InlineKeyboardButton("❤️ Romance", callback_data="cat_romance"),
+            InlineKeyboardButton("👻 Horror", callback_data="cat_horror"),
+        ],
+        [
+            InlineKeyboardButton("🔪 Thriller", callback_data="cat_thriller"),
+            InlineKeyboardButton("🎭 Drama", callback_data="cat_drama"),
+        ],
+        [InlineKeyboardButton("⬅️ Main Menu", callback_data="main_menu")],
+    ])
 
-# =========================================================
-# MEMBERSHIP
-# =========================================================
 
 async def is_member(bot, user_id):
     try:
-        member = await bot.get_chat_member(
-            MAIN_CHANNEL,
-            user_id,
-        )
-
-        return member.status in (
-            "member",
-            "administrator",
-            "creator",
-        )
-
+        member = await bot.get_chat_member(MAIN_CHANNEL, user_id)
+        return member.status in ("member", "administrator", "creator")
     except Exception as error:
-        print("Membership check error:", error)
+        print("Membership check error:", repr(error))
         return False
 
-# =========================================================
-# MAIN MENU
-# =========================================================
 
-async def show_main_menu(
-    update,
-    context,
-):
+async def show_main_menu(update, context):
     text = (
         "🎬 <b>Movie Myanmar</b>\n\n"
         "ဟေး 👋 ကြိုဆိုပါတယ်နော် ❤️\n"
-        "ဇာတ်ကားကြည့်ဖို့ "
-        "အောက်က menu ကနေ ရွေးလိုက်ပါ 👇"
+        "ဇာတ်ကားကြည့်ဖို့ အောက်က menu ကနေ ရွေးလိုက်ပါ 👇"
     )
 
     if update.callback_query:
@@ -203,51 +107,33 @@ async def show_main_menu(
             reply_markup=movie_keyboard(),
         )
 
-# =========================================================
-# RENDER HEALTH SERVER + TELEGRAM WEBHOOK
-# =========================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
 
-    def log_message(
-        self,
-        format_string,
-        *args,
-    ):
+    def log_message(self, format_string, *args):
         return
 
     def do_GET(self):
-
-        if self.path in (
-            "/",
-            "/health",
-        ):
-
+        if self.path in ("/", "/health"):
             body = b"Movie Myanmar bot is running."
 
             self.send_response(200)
-
             self.send_header(
                 "Content-Type",
                 "text/plain; charset=utf-8",
             )
-
             self.send_header(
                 "Content-Length",
                 str(len(body)),
             )
-
             self.end_headers()
-
             self.wfile.write(body)
-
             return
 
         self.send_response(404)
         self.end_headers()
 
     def do_POST(self):
-
         if self.path != WEBHOOK_PATH:
             self.send_response(404)
             self.end_headers()
@@ -264,7 +150,6 @@ class HealthHandler(BaseHTTPRequestHandler):
             return
 
         try:
-
             content_length = int(
                 self.headers.get(
                     "Content-Length",
@@ -272,26 +157,17 @@ class HealthHandler(BaseHTTPRequestHandler):
                 )
             )
 
-            body = self.rfile.read(
-                content_length
-            )
-
-            data = json.loads(
-                body.decode("utf-8")
-            )
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode("utf-8"))
 
             update = Update.de_json(
                 data,
                 telegram_application.bot,
             )
 
-            future = (
-                asyncio.run_coroutine_threadsafe(
-                    telegram_application.update_queue.put(
-                        update
-                    ),
-                    main_loop,
-                )
+            future = asyncio.run_coroutine_threadsafe(
+                telegram_application.update_queue.put(update),
+                main_loop,
             )
 
             future.result(timeout=10)
@@ -301,233 +177,126 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"OK")
 
         except Exception as error:
-
-            print(
-                "Webhook error:",
-                error,
-            )
-
+            print("Webhook error:", repr(error))
             self.send_response(500)
             self.end_headers()
 
 
 def start_http_server():
+    port = int(os.getenv("PORT", "10000"))
 
-    global http_server
-
-    port = int(
-        os.getenv(
-            "PORT",
-            "10000",
-        )
-    )
-
-    http_server = HTTPServer(
-        (
-            "0.0.0.0",
-            port,
-        ),
+    server = HTTPServer(
+        ("0.0.0.0", port),
         HealthHandler,
     )
 
     thread = threading.Thread(
-        target=http_server.serve_forever,
+        target=server.serve_forever,
         daemon=True,
     )
 
     thread.start()
 
-    print(
-        "HTTP server started on port",
-        port,
-    )
+    print("HTTP server started on port", port)
 
-# =========================================================
-# /START
-# =========================================================
 
 async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     user_id = update.effective_user.id
 
-    if await is_member(
-        context.bot,
-        user_id,
-    ):
-
-        await show_main_menu(
-            update,
-            context,
-        )
-
+    if await is_member(context.bot, user_id):
+        await show_main_menu(update, context)
         return
 
     await update.message.reply_text(
         "🎬 <b>Movie Myanmar</b>\n\n"
-        "ဟေး 👋 Channel ထဲဝင်ပြီးမှ "
-        "bot ကို ဆက်သုံးလို့ရမယ်နော် ❤️\n\n"
-        "အောက်က <b>Movie Channel ဝင်မယ်</b> "
-        "ကိုနှိပ်ပြီး ဝင်ပေးပါ 👇",
+        "ဟေး 👋 Channel ထဲဝင်ပြီးမှ bot ကို ဆက်သုံးလို့ရမယ်နော် ❤️\n\n"
+        "အောက်က <b>Movie Channel ဝင်မယ်</b> ကိုနှိပ်ပြီး ဝင်ပေးပါ 👇",
         parse_mode="HTML",
         reply_markup=join_keyboard(),
     )
 
-# =========================================================
-# BUTTON HANDLER
-# =========================================================
 
 async def button_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     query = update.callback_query
 
     await query.answer()
 
     user_id = update.effective_user.id
-
     data = query.data
-
-    # -----------------------------------------------------
-    # MEMBERSHIP CHECK
-    # -----------------------------------------------------
 
     if data == "check_membership":
 
-        if await is_member(
-            context.bot,
-            user_id,
-        ):
-
+        if await is_member(context.bot, user_id):
             await query.edit_message_text(
                 "✅ ဝင်ထားတာ အဆင်ပြေပြီနော် ❤️\n\n"
-                "အခု Movie Myanmar ကို "
-                "စသုံးလို့ရပါပြီ 👇",
+                "အခု Movie Myanmar ကို စသုံးလို့ရပါပြီ 👇",
                 reply_markup=movie_keyboard(),
             )
-
         else:
-
             await query.edit_message_text(
                 "🥺 Channel ထဲ မဝင်ရသေးဘူးနော်။\n\n"
-                "အရင်ဆုံး Channel ထဲဝင်ပြီး "
-                "ပြန်စစ်ပေးပါ ❤️",
+                "အရင်ဆုံး Channel ထဲဝင်ပြီး ပြန်စစ်ပေးပါ ❤️",
                 reply_markup=join_keyboard(),
             )
 
         return
 
-    # -----------------------------------------------------
-    # MEMBERSHIP GATE
-    # -----------------------------------------------------
-
-    if not await is_member(
-        context.bot,
-        user_id,
-    ):
-
+    if not await is_member(context.bot, user_id):
         await query.edit_message_text(
-            "🥺 Bot သုံးဖို့ Movie Channel ထဲ "
-            "အရင်ဝင်ပေးပါနော် ❤️",
+            "🥺 Bot သုံးဖို့ Movie Channel ထဲ အရင်ဝင်ပေးပါနော် ❤️",
             reply_markup=join_keyboard(),
         )
-
         return
-
-    # -----------------------------------------------------
-    # MAIN MENU
-    # -----------------------------------------------------
 
     if data == "main_menu":
-
-        await show_main_menu(
-            update,
-            context,
-        )
-
+        await show_main_menu(update, context)
         return
 
-    # -----------------------------------------------------
-    # MOVIES
-    # -----------------------------------------------------
-
     if data == "movies":
-
         await query.edit_message_text(
             "🎬 <b>Movie Myanmar</b>\n\n"
             "ဇာတ်ကားတွေကို Movie Channel ထဲမှာ\n"
             "ဆက်ကြည့်နိုင်ပါတယ် 👇\n\n"
-            "📂 <b>ဇာတ်ကားအမျိုးအစား "
-            "ရွေးပါ</b> 👇",
+            "📂 <b>ဇာတ်ကားအမျိုးအစား ရွေးပါ</b> 👇",
             parse_mode="HTML",
             reply_markup=category_keyboard(),
         )
-
         return
 
-    # -----------------------------------------------------
-    # SEARCH
-    # -----------------------------------------------------
-
     if data == "search_movie":
-
-        context.user_data[
-            "search_mode"
-        ] = True
+        context.user_data["search_mode"] = True
+        context.user_data["ai_mode"] = False
 
         await query.edit_message_text(
             "🔎 <b>ဇာတ်ကားရှာမယ်</b>\n\n"
-            "ရှာချင်တဲ့ ဇာတ်ကားနာမည်ကို "
-            "ရိုက်ပို့လိုက်ပါနော် 🎬",
+            "ရှာချင်တဲ့ ဇာတ်ကားနာမည်ကို ရိုက်ပို့လိုက်ပါနော် 🎬",
             parse_mode="HTML",
         )
-
         return
 
-    # -----------------------------------------------------
-    # CATEGORIES
-    # -----------------------------------------------------
-
     if data == "categories":
-
         await query.edit_message_text(
-            "📂 <b>ဇာတ်ကားအမျိုးအစား "
-            "ရွေးပါ</b> 👇",
+            "📂 <b>ဇာတ်ကားအမျိုးအစား ရွေးပါ</b> 👇",
             parse_mode="HTML",
             reply_markup=category_keyboard(),
         )
-
         return
-
-    # -----------------------------------------------------
-    # CATEGORY BUTTONS
-    # -----------------------------------------------------
 
     if data.startswith("cat_"):
 
         category_names = {
-
-            "cat_action":
-                "💥 Action",
-
-            "cat_comedy":
-                "😂 Comedy",
-
-            "cat_romance":
-                "❤️ Romance",
-
-            "cat_horror":
-                "👻 Horror",
-
-            "cat_thriller":
-                "🔪 Thriller",
-
-            "cat_drama":
-                "🎭 Drama",
+            "cat_action": "💥 Action",
+            "cat_comedy": "😂 Comedy",
+            "cat_romance": "❤️ Romance",
+            "cat_horror": "👻 Horror",
+            "cat_thriller": "🔪 Thriller",
+            "cat_drama": "🎭 Drama",
         }
 
         name = category_names.get(
@@ -539,41 +308,26 @@ async def button_handler(
             f"{name}\n\n"
             "ဒီအပိုင်းကို Movie Channel ထဲမှာ\n"
             "ဆက်ကြည့်နိုင်ပါတယ် 👇\n\n"
-            "📂 ဇာတ်ကားအမျိုးအစား "
-            "ရွေးပါ 👇",
+            "📂 ဇာတ်ကားအမျိုးအစား ရွေးပါ 👇",
             reply_markup=category_keyboard(),
         )
-
         return
 
-    # -----------------------------------------------------
-    # AI CHAT
-    # -----------------------------------------------------
-
     if data == "ai_chat":
-
-        context.user_data[
-            "ai_mode"
-        ] = True
+        context.user_data["ai_mode"] = True
+        context.user_data["search_mode"] = False
 
         await query.edit_message_text(
             "💬 <b>AI Chat</b>\n\n"
-            "ဟေး 😄 ဘာအကြောင်းပြောချင်လဲ "
-            "ပြောလို့ရတယ်နော်။\n"
-            "ဇာတ်ကားအကြောင်းလည်း "
-            "မေးလို့ရတယ် 🎬❤️",
+            "ဟေး 😄 ဘာအကြောင်းပြောချင်လဲ ပြောလို့ရတယ်နော်။\n"
+            "ဇာတ်ကားအကြောင်းလည်း မေးလို့ရတယ် 🎬❤️",
             parse_mode="HTML",
         )
-
         return
 
-# =========================================================
-# GEMINI PERSONALITY
-# =========================================================
 
 SYSTEM_INSTRUCTION = """
-You are a friendly fictional young woman
-chatting naturally with a Myanmar user.
+You are a friendly fictional young woman chatting naturally with a Myanmar user.
 
 Reply mainly in casual Burmese.
 
@@ -596,32 +350,22 @@ Important:
 - Do not overuse emojis.
 - Match the user's casual tone.
 - Keep normal chat replies reasonably short.
-- If the user asks a real question,
-  answer helpfully.
-- If the user jokes,
-  joke back naturally.
-- If the user says hello,
-  greet naturally.
-- If the user talks about movies,
-  respond naturally.
+- If the user asks a real question, answer helpfully.
+- If the user jokes, joke back naturally.
+- If the user says hello, greet naturally.
+- If the user talks about movies, respond naturally.
 """
 
-# =========================================================
-# GEMINI CHAT
-# =========================================================
 
 async def gemini_reply(
     user_id,
     user_text,
     context,
 ):
-
     if gemini_client is None:
-
         return (
-            "ဟေး 😅 AI ချိတ်ဆက်မှုလေး "
-            "မရသေးဘူး။ ခဏနေရင် "
-            "ပြန်ပြောကြမယ်နော် ❤️"
+            "ဟေး 😅 AI ချိတ်ဆက်မှုလေး မရသေးဘူး။ "
+            "ခဏနေရင် ပြန်ပြောကြမယ်နော် ❤️"
         )
 
     history = context.user_data.setdefault(
@@ -638,33 +382,21 @@ async def gemini_reply(
 
     history = history[-12:]
 
-    context.user_data[
-        "chat_history"
-    ] = history
-
-    conversation_lines = []
-
-    for item in history:
-
-        conversation_lines.append(
-            f'{item["role"]}: {item["text"]}'
-        )
+    context.user_data["chat_history"] = history
 
     conversation = "\n".join(
-        conversation_lines
+        f'{item["role"]}: {item["text"]}'
+        for item in history
     )
 
     prompt = (
         SYSTEM_INSTRUCTION
-        + "\n\n"
-        + "Conversation history:\n"
+        + "\n\nConversation history:\n"
         + conversation
-        + "\n\n"
-        + "Reply naturally to the user's latest message."
+        + "\n\nReply naturally to the user's latest message."
     )
 
     try:
-
         response = await asyncio.to_thread(
             gemini_client.models.generate_content,
             model="gemini-3.8-flash",
@@ -678,10 +410,9 @@ async def gemini_reply(
         )
 
         if not answer:
-
             answer = (
-                "ဟေး 😅 စာပြန်ဖို့ "
-                "ခဏလေး အခက်အခဲဖြစ်သွားတယ်နော်။ "
+                "ဟေး 😅 စာပြန်ဖို့ ခဏလေး "
+                "အခက်အခဲဖြစ်သွားတယ်နော်။ "
                 "ပြန်ပြောကြမယ် ❤️"
             )
 
@@ -692,17 +423,14 @@ async def gemini_reply(
             }
         )
 
-        context.user_data[
-            "chat_history"
-        ] = history[-12:]
+        context.user_data["chat_history"] = history[-12:]
 
         return answer
 
     except Exception as error:
-
         print(
             "Gemini error:",
-            error,
+            repr(error),
         )
 
         return (
@@ -711,15 +439,11 @@ async def gemini_reply(
             "ပြန်ပို့ပေးနော် ❤️"
         )
 
-# =========================================================
-# TEXT MESSAGE HANDLER
-# =========================================================
 
 async def message_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     if not update.message:
         return
 
@@ -727,57 +451,33 @@ async def message_handler(
         return
 
     user_id = update.effective_user.id
-
     text = update.message.text.strip()
-
-    # -----------------------------------------------------
-    # MEMBERSHIP GATE
-    # -----------------------------------------------------
 
     if not await is_member(
         context.bot,
         user_id,
     ):
-
         await update.message.reply_text(
             "🥺 Bot သုံးဖို့ Movie Channel ထဲ "
             "အရင်ဝင်ပေးပါနော် ❤️",
             reply_markup=join_keyboard(),
         )
-
         return
 
-    # -----------------------------------------------------
-    # MOVIE SEARCH
-    # -----------------------------------------------------
+    if context.user_data.get("search_mode"):
 
-    if context.user_data.get(
-        "search_mode"
-    ):
-
-        context.user_data[
-            "search_mode"
-        ] = False
+        context.user_data["search_mode"] = False
 
         await update.message.reply_text(
-            f"🔎 <b>{text}</b> ကို "
-            "ရှာပေးမယ်နော် 🎬\n\n"
-            "Movie Channel ထဲမှာ "
-            "ရှာကြည့်နိုင်ပါတယ် 👇\n"
+            f"🔎 <b>{text}</b> ကို ရှာပေးမယ်နော် 🎬\n\n"
+            "Movie Channel ထဲမှာ ရှာကြည့်နိုင်ပါတယ် 👇\n"
             f"{MOVIE_CHANNEL_URL}",
             parse_mode="HTML",
             reply_markup=movie_keyboard(),
         )
-
         return
 
-    # -----------------------------------------------------
-    # AI MODE
-    # -----------------------------------------------------
-
-    if context.user_data.get(
-        "ai_mode"
-    ):
+    if context.user_data.get("ai_mode"):
 
         answer = await gemini_reply(
             user_id,
@@ -785,15 +485,8 @@ async def message_handler(
             context,
         )
 
-        await update.message.reply_text(
-            answer
-        )
-
+        await update.message.reply_text(answer)
         return
-
-    # -----------------------------------------------------
-    # AUTOMATIC AI ENTRY
-    # -----------------------------------------------------
 
     lower = text.lower()
 
@@ -809,10 +502,7 @@ async def message_handler(
         word in lower
         for word in ai_words
     ):
-
-        context.user_data[
-            "ai_mode"
-        ] = True
+        context.user_data["ai_mode"] = True
 
         answer = await gemini_reply(
             user_id,
@@ -820,15 +510,8 @@ async def message_handler(
             context,
         )
 
-        await update.message.reply_text(
-            answer
-        )
-
+        await update.message.reply_text(answer)
         return
-
-    # -----------------------------------------------------
-    # DEFAULT RESPONSE
-    # -----------------------------------------------------
 
     await update.message.reply_text(
         "ဟေး 😄 ဘာလုပ်ချင်လဲ "
@@ -836,9 +519,6 @@ async def message_handler(
         reply_markup=movie_keyboard(),
     )
 
-# =========================================================
-# MAIN
-# =========================================================
 
 async def main():
 
@@ -854,13 +534,7 @@ async def main():
             "BOT_TOKEN is missing"
         )
 
-    main_loop = (
-        asyncio.get_running_loop()
-    )
-
-    # -----------------------------------------------------
-    # CREATE TELEGRAM APPLICATION
-    # -----------------------------------------------------
+    main_loop = asyncio.get_running_loop()
 
     telegram_application = (
         Application.builder()
@@ -868,10 +542,6 @@ async def main():
         .updater(None)
         .build()
     )
-
-    # -----------------------------------------------------
-    # HANDLERS
-    # -----------------------------------------------------
 
     telegram_application.add_handler(
         CommandHandler(
@@ -881,4 +551,84 @@ async def main():
     )
 
     telegram_application.add_handler(
-        CallbackQueryHandler
+        CallbackQueryHandler(
+            button_handler
+        )
+    )
+
+    telegram_application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            message_handler,
+        )
+    )
+
+    print("Telegram handlers added.")
+
+    await telegram_application.initialize()
+
+    print(
+        "Telegram application initialized."
+    )
+
+    await telegram_application.start()
+
+    print(
+        "Telegram application started."
+    )
+
+    start_http_server()
+
+    webhook_url = (
+        f"{RENDER_URL}"
+        f"{WEBHOOK_PATH}"
+    )
+
+    print(
+        "Setting Telegram webhook:",
+        webhook_url,
+    )
+
+    await telegram_application.bot.set_webhook(
+        url=webhook_url,
+        secret_token=WEBHOOK_SECRET,
+    )
+
+    print(
+        "Telegram webhook set successfully."
+    )
+
+    me = await telegram_application.bot.get_me()
+
+    print(
+        "Bot connected:",
+        me.username,
+    )
+
+    print("========================================")
+    print("Movie Myanmar Bot is LIVE.")
+    print("Waiting for Telegram updates...")
+    print("========================================")
+
+    await asyncio.Event().wait()
+
+
+if __name__ == "__main__":
+
+    try:
+        asyncio.run(main())
+
+    except KeyboardInterrupt:
+
+        print(
+            "Bot stopped by KeyboardInterrupt."
+        )
+
+    except Exception as error:
+
+        print(
+            "FATAL STARTUP ERROR:",
+            repr(error),
+        )
+
+        raise

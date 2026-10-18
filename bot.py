@@ -427,7 +427,7 @@ async def handle_special_reply(update, text):
     if any(phrase in normalized for phrase in rude_reason_phrases):
         await update.message.reply_text(
             "ကိုကို လင်းမြတ်က အဲ့လိုသင်ပေးထားတာလေ 🤭\n"
-            "စွာတင်ရင် စွာ၊ ပါးချသင့်ရင် ချပစ်ရမယ်ဆိုပြီး 😝"
+            "စွာသင့်ရင် စွာ၊ ပါးချသင့်ရင် ချပစ်ရမယ်ဆိုပြီး 😝"
         )
         try:
             await update.message.reply_sticker(sticker=TONGUE_STICKER)

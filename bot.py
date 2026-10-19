@@ -329,30 +329,36 @@ def save_ai_usage():
 
     try:
 
+        # Copy data while holding the lock.
+        # File writing happens after the lock is released.
         with ai_usage_lock:
 
-            temp_file = (
-                AI_USAGE_FILE
-                + ".tmp"
+            data_to_save = dict(
+                ai_usage
             )
 
-            with open(
-                temp_file,
-                "w",
-                encoding="utf-8",
-            ) as f:
+        temp_file = (
+            AI_USAGE_FILE
+            + ".tmp"
+        )
 
-                json.dump(
-                    ai_usage,
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                )
+        with open(
+            temp_file,
+            "w",
+            encoding="utf-8",
+        ) as f:
 
-            os.replace(
-                temp_file,
-                AI_USAGE_FILE,
+            json.dump(
+                data_to_save,
+                f,
+                ensure_ascii=False,
+                indent=2,
             )
+
+        os.replace(
+            temp_file,
+            AI_USAGE_FILE,
+        )
 
     except Exception as e:
 
@@ -406,18 +412,22 @@ def increment_ai_usage(
 
             current = 0
 
-        ai_usage[key] = (
-            current + 1
-        )
+        new_count = current + 1
 
+        ai_usage[key] = new_count
+
+    # IMPORTANT:
+    # Save AFTER releasing ai_usage_lock.
     save_ai_usage()
 
     print(
         f"AI usage: user={user_id} "
-        f"count={ai_usage.get(key, 0)}/"
+        f"count={new_count}/"
         f"{FREE_AI_LIMIT}",
         flush=True,
     )
+
+    return new_count
 
 
 # ============================================================
@@ -491,6 +501,7 @@ def movie_search(
         if not combined:
             continue
 
+        # Exact substring match
         if q in combined:
 
             results.append(
@@ -499,6 +510,7 @@ def movie_search(
 
             continue
 
+        # Word match
         matched = sum(
             1
             for word in query_words
@@ -1612,6 +1624,7 @@ async def send_movie_request(
 async def reply_movie_search(
     message,
     query,
+    context=None,
 ):
 
     results = movie_search(
@@ -1624,6 +1637,12 @@ async def reply_movie_search(
             message,
             query,
         )
+
+        if context is not None:
+
+            context.user_data[
+                "last_movie_query"
+            ] = query
 
         await message.reply_text(
             f"😒 <b>{query}</b> ကို "
@@ -1638,7 +1657,13 @@ async def reply_movie_search(
             parse_mode="HTML",
         )
 
-        return
+        return False
+
+    if context is not None:
+
+        context.user_data[
+            "last_movie_query"
+        ] = query
 
     await message.reply_text(
         f"🔎 <b>{query}</b>\n\n"
@@ -1698,6 +1723,8 @@ async def reply_movie_search(
                 )
             ),
         )
+
+    return True
 
 
 # ============================================================
@@ -1977,54 +2004,49 @@ async def movie_fallback(
 CONVERSATION_WORDS = [
 
     "စကားပြော",
-
     "စကားပြောမယ်",
-
     "စကားပြောချင်",
-
     "စကားပြောချင်တယ်",
-
-    "နင်နဲ့စကားပြော",
-
-    "နင်နဲ့ စကားပြော",
-
-    "မင်းနဲ့စကားပြော",
-
-    "မင်းနဲ့ စကားပြော",
-
-    "မင်းနဲ့ပြော",
-
-    "နင်နဲ့ပြော",
-
+    "စကားပြောချင်လို့",
+    "စကားပြောမယ်လေ",
+    "စကားပြောကြမယ်",
     "စကားပြောရအောင်",
 
-    "စကားပြောကြမယ်",
+    "နင်နဲ့စကားပြော",
+    "နင်နဲ့ စကားပြော",
+    "နင်နဲ့ပြော",
+    "နင်နဲ့ပြောမယ်",
 
-    "ငါနဲ့ပြော",
-
-    "ငါနဲ့စကားပြော",
-
-    "ဘာလုပ်နေလဲ",
-
-    "ဘာလုပ်နေတာလဲ",
-
-    "ဘာလုပ်နေလို့လဲ",
-
-    "နေကောင်းလား",
-
-    "ဘယ်လိုနေလဲ",
-
-    "အိပ်သေးလား",
-
-    "ဘာဖြစ်နေလဲ",
-
-    "ဘာဖြစ်နေတာလဲ",
-
-    "ငါနဲ့ပြောမယ်",
-
+    "မင်းနဲ့စကားပြော",
+    "မင်းနဲ့ စကားပြော",
+    "မင်းနဲ့ပြော",
     "မင်းနဲ့ပြောမယ်",
 
-    "နင်နဲ့ပြောမယ်",
+    "ငါနဲ့စကားပြော",
+    "ငါနဲ့ စကားပြော",
+    "ငါနဲ့ပြော",
+    "ငါနဲ့ပြောမယ်",
+
+    "ဘာလုပ်နေလဲ",
+    "ဘာလုပ်နေတာလဲ",
+    "ဘာလုပ်နေလို့လဲ",
+
+    "ဘာဖြစ်နေလဲ",
+    "ဘာဖြစ်နေတာလဲ",
+
+    "နေကောင်းလား",
+    "ဘယ်လိုနေလဲ",
+    "အိပ်သေးလား",
+
+    "ကောင်မလေး",
+    "တိနေ့ဘာလုပ်",
+    "ဒီနေ့ဘာလုပ်",
+    "ဘာလုပ်မလဲ",
+
+    "ဟိတ်",
+    "ဟိတ်ဟာ",
+    "ဟေ့",
+    "ဟေး",
 
 ]
 
@@ -2032,19 +2054,10 @@ CONVERSATION_WORDS = [
 AI_WORDS = [
 
     "ai",
-
     "xiao",
-
     "小雨",
-
-    "ဟိုင်း",
-
-    "ဟေး",
-
     "hello",
-
     "hi",
-
     "hey",
 
 ]
@@ -2076,6 +2089,43 @@ def is_ai_request(
 
 
 # ============================================================
+# FOLLOW-UP MOVIE REQUEST DETECTION
+# ============================================================
+
+FOLLOWUP_MOVIE_WORDS = [
+
+    "ရှာပေး",
+    "ရှာပေးပါ",
+    "ပေး",
+    "ရပြီလား",
+    "ရပြီ",
+    "အေး",
+    "အေးပေး",
+    "အေး ရှာပေး",
+    "ဟုတ်",
+    "ဟုတ်ကဲ့",
+    "ရမလား",
+    "ကြည့်မယ်",
+    "ကြည့်ချင်တယ်",
+
+]
+
+
+def is_movie_followup(
+    text,
+):
+
+    normalized = normalize_text(
+        text
+    )
+
+    return any(
+        word in normalized
+        for word in FOLLOWUP_MOVIE_WORDS
+    )
+
+
+# ============================================================
 # /START
 # ============================================================
 
@@ -2090,6 +2140,11 @@ async def start_command(
 
     if not user:
         return
+
+    # Reset only current interaction mode.
+    context.user_data[
+        "mode"
+    ] = ""
 
     joined = await is_member(
         user.id,
@@ -2162,9 +2217,19 @@ async def reset_command(
             None,
         )
 
+    context.user_data[
+        "mode"
+    ] = ""
+
+    context.user_data.pop(
+        "last_movie_query",
+        None,
+    )
+
     await update.message.reply_text(
         "🔄 Chat history reset "
         "လုပ်ပြီးပြီ 😝\n"
+        "AI quota ကိုတော့ မreset လုပ်ဘူးနော်။\n"
         "ပြန်စကြမယ် 🎬❤️"
     )
 
@@ -2413,12 +2478,17 @@ async def message_handler(
         await reply_movie_search(
             update.message,
             text,
+            context,
         )
 
         return
 
     # --------------------------------------------------------
     # MOVIE DATABASE SEARCH FIRST
+    #
+    # IMPORTANT:
+    # This runs BEFORE AI/quota.
+    # Therefore AI exhaustion cannot break movie search.
     # --------------------------------------------------------
 
     results = movie_search(
@@ -2434,9 +2504,51 @@ async def message_handler(
         await reply_movie_search(
             update.message,
             text,
+            context,
         )
 
         return
+
+    # --------------------------------------------------------
+    # FOLLOW-UP TO LAST MOVIE
+    #
+    # Example:
+    # User: By Any Means
+    # Bot: found movie
+    # User: အေး ရှာပေး
+    #
+    # Search the previous movie again.
+    # --------------------------------------------------------
+
+    last_movie_query = (
+        context.user_data.get(
+            "last_movie_query",
+            "",
+        )
+    )
+
+    if (
+        last_movie_query
+        and is_movie_followup(text)
+    ):
+
+        followup_results = movie_search(
+            last_movie_query
+        )
+
+        if followup_results:
+
+            context.user_data[
+                "mode"
+            ] = ""
+
+            await reply_movie_search(
+                update.message,
+                last_movie_query,
+                context,
+            )
+
+            return
 
     # --------------------------------------------------------
     # MOVIE REQUEST DETECTION
@@ -2445,35 +2557,20 @@ async def message_handler(
     movie_request_words = [
 
         "ရှိလား",
-
         "ရှိမလား",
-
         "ရှာပေး",
-
         "ရှာပေးပါ",
-
         "ကားရှာ",
-
         "ဇာတ်ကားရှာ",
-
         "movieရှာ",
-
         "movie ရှာ",
-
         "filmရှာ",
-
         "film ရှာ",
-
         "ကြည့်ချင်",
-
         "ကြည့်မယ်",
-
         "ကားလိုချင်",
-
         "ကားပေး",
-
         "movie",
-
         "film",
 
     ]
@@ -2504,6 +2601,7 @@ async def message_handler(
         await reply_movie_search(
             update.message,
             text,
+            context,
         )
 
         return
@@ -2545,6 +2643,9 @@ async def message_handler(
 
         # ----------------------------------------------------
         # FREE 20 EXHAUSTED
+        #
+        # ONLY AI conversation stops here.
+        # Movie search above is still available.
         # ----------------------------------------------------
 
         if (
@@ -2575,8 +2676,26 @@ async def message_handler(
 
         if used_ai:
 
-            increment_ai_usage(
-                user.id
+            new_count = (
+                increment_ai_usage(
+                    user.id
+                )
+            )
+
+            remaining = max(
+                0,
+                FREE_AI_LIMIT
+                - new_count,
+            )
+
+            # Don't add quota text to every AI response.
+            # It is only logged server-side.
+
+            print(
+                f"AI remaining for "
+                f"user={user.id}: "
+                f"{remaining}",
+                flush=True,
             )
 
         await send_long_text(

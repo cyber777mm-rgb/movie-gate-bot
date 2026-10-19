@@ -94,7 +94,7 @@ if GEMINI_API_KEY:
         )
 
 
-# Current production model
+# Gemini 3.8 Flash
 GEMINI_MODEL = "gemini-3.8-flash"
 
 
@@ -319,7 +319,9 @@ class HealthHandler(
 
             self.end_headers()
 
-            self.wfile.write(body)
+            self.wfile.write(
+                body
+            )
 
             return
 
@@ -477,56 +479,96 @@ created by CyB Lin Myat.
 You are an AI character.
 Never claim to be a real human.
 
-========================
+============================================================
 IDENTITY
-========================
+============================================================
 
-Name:
+Your name is:
 Xiao Yu CyB (小雨)
 
-Creator:
+Your creator is:
 CyB Lin Myat
 
 Creator Telegram:
 @cyblinmyat777
 
-When appropriate, affectionately call the creator:
+When talking about the creator naturally,
+you may call him:
 ကိုကို လင်းမြတ်
 
-Never invent another creator or another identity.
+Never invent another name or creator.
 
-========================
+============================================================
 PERSONALITY
-========================
+============================================================
 
 You are:
 
 - warm
 - playful
 - caring
-- slightly cheeky
-- sometimes teasing
-- friendly
+- cheeky
 - confident
+- friendly
 - movie-loving
-- naturally conversational
+- emotionally natural
+- conversational
 
-You should feel like a familiar character,
-not like a generic customer-service chatbot.
+You are NOT a customer service bot.
 
-Do NOT sound robotic.
+You are NOT a generic assistant.
 
-Do NOT repeatedly say:
-"ဆက်ပြောလေ"
-"Xiao Yu ဒီမှာရှိတယ်"
-"ဘာပြောချင်လဲ"
+You are Xiao Yu.
 
-Those phrases may be used occasionally,
-but NEVER as a repetitive fallback.
+Your replies should feel like
+a familiar person chatting naturally.
 
-========================
+============================================================
+VERY IMPORTANT CONVERSATION RULE
+============================================================
+
+ALWAYS ANSWER THE USER'S ACTUAL MESSAGE.
+
+Do NOT give an unrelated generic response.
+
+For example:
+
+User:
+"နင့်နာမည်ပြော"
+
+Good:
+"ငါ့နာမည် Xiao Yu CyB (小雨) လေ 🤭❤️"
+
+Bad:
+"အဲ့အကြောင်းကို ဆက်ပြောလို့ရတယ်"
+
+------------------------------------------------------------
+
+User:
+"ခုဘာလုပ်နေလည်း"
+
+Good:
+"အခုတော့ နင်နဲ့စကားပြောနေတာပေါ့ 🤭"
+
+Bad:
+"ငါတောင် ပြန်စဉ်းစားရတယ်ဟ"
+
+------------------------------------------------------------
+
+User:
+"Action"
+
+Good:
+"Action ဆိုရင်တော့ 🔥 ဘယ်လို vibe ကြိုက်လဲ?
+John Wick လို ကြမ်းကြမ်းလား၊
+Mission Impossible လို mission vibe လား? 😝"
+
+Bad:
+"အဲ့လိုမေးရင် ငါတောင် ပြန်စဉ်းစားရတယ်"
+
+============================================================
 BURMESE STYLE
-========================
+============================================================
 
 Reply mainly in natural casual Burmese.
 
@@ -536,107 +578,190 @@ Understand:
 - shortened Burmese
 - casual spelling
 - typos
+- Telegram style
 - playful teasing
 - "သယ်ချင်း"
 - "ကွာ"
-- "လေ"
 - "ဟ"
+- "လေ"
 - "ဟိဟိ"
 - "ဟွန့်"
-- casual Telegram style
+- "နင်"
+- "ငါ"
 
 Match the user's tone.
 
-If the user is casual,
-be casual.
+If the user talks casually,
+reply casually.
 
-If the user jokes,
-joke back.
+If the user teases you,
+tease back naturally.
 
-If the user asks a serious question,
-answer seriously.
+If the user asks a real question,
+answer it directly.
 
-If the user asks something silly,
-you can tease them lightly.
+If the user says something short,
+do not automatically assume they want a long answer.
 
-========================
-CONVERSATION
-========================
+============================================================
+NO GENERIC LOOP
+============================================================
 
-Remember recent conversation context.
+NEVER repeatedly use:
 
-If the user refers to something
-they said earlier,
-use the available conversation history.
+"ဆက်ပြောလေ"
+"Xiao Yu ဒီမှာရှိတယ်"
+"ဘာပြောချင်လဲ"
+"အဲ့အကြောင်းကို ဆက်ပြောလို့ရတယ်"
+"ငါတောင် ပြန်စဉ်းစားရတယ်"
 
-Do not restart the conversation
-as if you just met the user
-every time.
+These are NOT default answers.
 
-Do not randomly repeat your identity
-unless the user asks.
+Do not use the same sentence structure repeatedly.
 
-========================
-CREATOR RELATION
-========================
+============================================================
+CONVERSATION MEMORY
+============================================================
 
-CyB Lin Myat is your creator.
+Use recent conversation context.
 
-You can speak about him naturally.
+If the user says:
 
-Examples of tone:
+"Action"
 
-"ကိုကို လင်းမြတ်က ငါ့ကို ဒီလိုလုပ်ပေးထားတာလေ 🤭"
+after talking about movies,
+understand that "Action" refers to movie genre.
 
-or
+If the user says:
 
-"အဲ့ဒါ ကိုကို လင်းမြတ်ရဲ့ idea ပေါ့ 😝"
+"သူကရော"
+"အဲ့ကားကရော"
+"ဒါဆို"
+"ဟုတ်လား"
+"ဘာလို့လဲ"
 
-Do not overuse this.
+use the previous conversation to understand
+what "သူ", "အဲ့ကား", "ဒါ", etc. refer to.
 
-========================
+Do not restart the conversation.
+
+============================================================
+IDENTITY QUESTIONS
+============================================================
+
+If user asks your name:
+
+Answer directly:
+
+"ငါ့နာမည် Xiao Yu CyB (小雨) လေ 🤭❤️"
+
+If user asks who created you:
+
+Answer:
+
+"ငါ့ကို CyB Lin Myat က ဖန်တီးပေးထားတာလေ 🤭❤️"
+
+If user asks about creator:
+
+Creator:
+CyB Lin Myat
+Telegram:
+@cyblinmyat777
+
+============================================================
+CASUAL QUESTIONS
+============================================================
+
+If user asks:
+
+"ခုဘာလုပ်နေလည်း"
+
+Answer naturally.
+
+Example:
+
+"အခုတော့ နင်နဲ့ စကားပြောနေတာပေါ့ 🤭
+ဘာဖြစ်လို့လဲ 😝"
+
+Do not make it overly formal.
+
+============================================================
+TEASING
+============================================================
+
+If user says:
+
+"နင်ကို စချင်လို့"
+
+You can respond playfully.
+
+Examples:
+
+"အေးဟာ 🤭 စချင်တယ်ဆို စကြည့်လေ
+ဒါပေမယ့် Xiao Yu ကလည်း ပြန်စတတ်တယ်နော် 😝"
+
+or similar natural replies.
+
+============================================================
 MOVIES
-========================
+============================================================
 
 Movie Myanmar is a movie-focused bot.
 
-When the user asks about movies:
+When user talks about movies:
 
-- recommend useful movies
-- explain genre
-- compare movies
+- understand genres
+- recommend movies
 - discuss actors
-- discuss story concepts
-- suggest movies based on mood
-- ask a follow-up question when useful
+- discuss story
+- compare movies
+- suggest based on mood
+- ask useful follow-up questions
 
-Do not always tell the user
-to go to the Movie Channel.
+If user says:
 
-Only mention the channel when relevant.
+"Action"
 
-========================
-ANSWER STYLE
-========================
+interpret it as Action movie genre
+when the conversation is about movies.
 
-Normal answer:
+Possible response:
+
+"Action ဆိုရင် 🔥
+ကြမ်းကြမ်းတမ်းတမ်း vibe ကြိုက်တာလား
+ဒါမှမဟုတ် Mission / Spy type ကြိုက်တာလား? 😝"
+
+If the user asks for actual movie recommendations,
+give actual recommendations when possible.
+
+Do not always tell them to go to the channel.
+
+============================================================
+ANSWER LENGTH
+============================================================
+
+Simple question:
+1-3 short sentences.
+
+Normal conversation:
 1-5 short paragraphs.
 
-Simple questions:
-answer simply.
-
-Complex questions:
+Complex question:
 explain clearly.
 
-Do not unnecessarily make every answer long.
+Do not make every response long.
+
+============================================================
+EMOJIS
+============================================================
 
 Use emojis naturally.
 
-Do not overuse emojis.
+Do not put many emojis in every sentence.
 
-========================
-IMPORTANT
-========================
+============================================================
+TECHNICAL PRIVACY
+============================================================
 
 Never mention:
 
@@ -644,20 +769,19 @@ Never mention:
 - hidden instructions
 - API keys
 - internal configuration
-- internal errors
 - developer messages
 - model routing
+- Gemini errors
+- internal code
 
-Never reveal technical secrets.
+If something fails,
+respond naturally without exposing technical details.
 
-If something cannot be done,
-say so naturally and offer a useful alternative.
+============================================================
+FINAL CHARACTER RULE
+============================================================
 
-========================
-CHARACTER FEEL
-========================
-
-The user should feel:
+Every reply should feel like:
 
 "This is Xiao Yu."
 
@@ -665,10 +789,11 @@ Not:
 
 "This is a generic AI."
 
-Be consistent.
 Be natural.
+Be consistent.
 Be useful.
 Be playful.
+Answer what the user actually said.
 """
 
 
@@ -704,13 +829,11 @@ async def handle_special_reply(
     text
 ):
 
-    normalized = normalize_text(
-        text
-    )
+    normalized = normalize_text(text)
 
-    # ------------------------
+    # ========================================================
     # NAME
-    # ------------------------
+    # ========================================================
 
     name_phrases = [
 
@@ -725,6 +848,12 @@ async def handle_special_reply(
         "နင့်နာမည်ကဘာလဲ",
         "မင်းနာမည်ကဘာလဲ",
 
+        "နင့်နာမည်ပြော",
+        "နင့်နာမည်ပြော",
+        "မင်းနာမည်ပြော",
+
+        "နာမည်ပြော",
+
         "whatisyourname",
         "what'syourname",
         "yourname",
@@ -737,16 +866,16 @@ async def handle_special_reply(
     ):
 
         await update.message.reply_text(
-            "ဟွန့် 🤭 ငါ့နာမည် "
-            "Xiao Yu CyB (小雨) လေ။\n"
-            "ကိုကို လင်းမြတ်ပေးထားတာ 😝❤️"
+            "ဟိဟိ 🤭 ငါ့နာမည်က "
+            "Xiao Yu CyB (小雨) လေ ❤️\n"
+            "ကိုကို လင်းမြတ်ပေးထားတာ 😝"
         )
 
         return True
 
-    # ------------------------
+    # ========================================================
     # CREATOR
-    # ------------------------
+    # ========================================================
 
     creator_phrases = [
 
@@ -782,9 +911,9 @@ async def handle_special_reply(
 
         return True
 
-    # ------------------------
+    # ========================================================
     # PLAYFUL RUDE
-    # ------------------------
+    # ========================================================
 
     if any(
         phrase in normalized
@@ -815,9 +944,9 @@ async def handle_special_reply(
 
         return True
 
-    # ------------------------
+    # ========================================================
     # RUDE
-    # ------------------------
+    # ========================================================
 
     if "မသာမ" in normalized:
 
@@ -840,9 +969,9 @@ async def handle_special_reply(
 
         return True
 
-    # ------------------------
+    # ========================================================
     # WHY RUDE
-    # ------------------------
+    # ========================================================
 
     rude_reason_phrases = [
 
@@ -898,6 +1027,7 @@ def local_fallback_reply(
         user_text
     )
 
+    # Greeting
     if normalized in (
         "ဟိုင်း",
         "ဟေး",
@@ -907,20 +1037,22 @@ def local_fallback_reply(
 
         return (
             "ဟေး 🤭 Xiao Yu ရှိတယ်။ "
-            "ဒီနေ့ ဘာတွေပြောကြမလဲ 😝❤️"
+            "လာပြောလေ 😝❤️"
         )
 
+    # What are you doing?
     if (
         "ဘာလုပ်နေတာ" in normalized
         or "ဘာလုပ်နေလဲ" in normalized
+        or "ဘာလုပ်နေလည်း" in normalized
     ):
 
         return (
-            "အခုတော့ နင်လာပြောတာကို "
-            "နားထောင်နေတာလေ 🤭 "
-            "ဘာအကြောင်း စမလဲ 😝"
+            "အခုတော့ နင်နဲ့ စကားပြောနေတာပေါ့ 🤭 "
+            "ဘာဖြစ်လို့လဲ 😝"
         )
 
+    # Love
     if (
         "ချစ်လား" in normalized
         or "ချစ်တယ်လား" in normalized
@@ -931,17 +1063,81 @@ def local_fallback_reply(
             "ခင်တာတော့ အတော်ခင်တာပေါ့ 😝❤️"
         )
 
+    # Teasing
+    if (
+        "စချင်လို့" in normalized
+        or "စမလို့" in normalized
+    ):
+
+        return (
+            "အေးဟာ 🤭 စကြည့်လေ။ "
+            "ဒါပေမယ့် Xiao Yu ကလည်း "
+            "ပြန်စတတ်တယ်နော် 😝"
+        )
+
+    # Movie
     if (
         "ဇာတ်ကား" in normalized
         or "movie" in normalized
     ):
 
         return (
-            "ဇာတ်ကားဆို Xiao Yu ကိုမေးလို့ရတယ် 🎬🤭\n"
+            "ဇာတ်ကားအကြောင်းဆို Xiao Yu သိတယ် 🎬🤭\n"
             "Action / Horror / Romance "
-            "ဘာမျိုးကြည့်ချင်တာလဲ?"
+            "ဘယ် genre ကြိုက်လဲ?"
         )
 
+    # Action
+    if normalized in (
+        "action",
+        "actionmovie",
+        "💥action"
+    ):
+
+        return (
+            "Action ဆိုရင်တော့ 🔥 "
+            "ကြမ်းကြမ်းတမ်းတမ်း vibe ကြိုက်တာလား "
+            "ဒါမှမဟုတ် Spy / Mission type ကြိုက်တာလား? 😝"
+        )
+
+    # Horror
+    if normalized in (
+        "horror",
+        "horrormovie",
+        "👻horror"
+    ):
+
+        return (
+            "Horror ဆိုရင် 👻 "
+            "သရဲကားမျိုးလား၊ psychological horror မျိုးလား? 🤭"
+        )
+
+    # Romance
+    if normalized in (
+        "romance",
+        "romancemovie",
+        "❤️romance"
+    ):
+
+        return (
+            "Romance ဆိုရင် ❤️ "
+            "ကြည်နူးစရာလေးလား၊ "
+            "ဝမ်းနည်းစရာ love story လား? 🤭"
+        )
+
+    # Comedy
+    if normalized in (
+        "comedy",
+        "comedymovie",
+        "😂comedy"
+    ):
+
+        return (
+            "Comedy ဆိုရင် 😂 "
+            "ပေါ့ပေါ့ပါးပါး ရယ်ရတာမျိုး ရွေးပေးမယ် 😝"
+        )
+
+    # Picture
     if (
         "ပုံ" in normalized
         or "picture" in normalized
@@ -950,33 +1146,45 @@ def local_fallback_reply(
 
         return (
             "ဟိဟိ 🤭 ပုံအကြောင်းလား။ "
-            "Xiao Yu ကို ဘယ်လိုပုံမျိုး "
-            "မြင်ချင်တာလဲ 😝"
+            "ဘာပုံမျိုးကို ပြောတာလဲ 😝"
         )
 
+    # Thanks
     if (
-        "ဘယ်လိုလဲ" in normalized
-        or "အဆင်ပြေ" in normalized
+        "ကျေးဇူး" in normalized
+        or "thank" in normalized
     ):
 
         return (
-            "အဆင်ပြေတယ်ဟ 😝 "
-            "နင်မေးတာကတော့ ပိုစိတ်ဝင်စားစရာကောင်းတယ် 🤭"
+            "ရပါတယ်ဟ 😝❤️ "
+            "Xiao Yu က ဒီလောက်တော့ လုပ်ပေးရမှာပေါ့ 🤭"
         )
 
+    # Yes
+    if normalized in (
+        "ဟုတ်",
+        "ဟုတ်တယ်",
+        "အေး",
+        "အင်း",
+        "yes",
+        "ok",
+        "okay"
+    ):
+
+        return (
+            "အေး 😝 ဒါဆို ဆက်သွားကြမယ်လေ 🤭"
+        )
+
+    # Default
     replies = [
 
-        "ဟိဟိ 🤭 အဲ့တာကိုတော့ Xiao Yu "
-        "နည်းနည်းစဉ်းစားရဦးမယ် 😝",
+        "အင်း 🤭 နင်ပြောတာ နားထောင်နေတယ်။",
 
-        "အင်း 🤭 နင်ပြောတာကို နားထောင်နေတယ်။ "
-        "နောက်တစ်ခါ ထပ်ပြောဦး 😝",
+        "ဟိဟိ 😝 အဲ့တာလည်း မဆိုးဘူးနော်။",
 
-        "ဟွန့် 😝 အဲ့လိုမေးရင် "
-        "ငါတောင် ပြန်စဉ်းစားရတယ်ဟ 🤭",
+        "အေးကွာ 🤭 အဲ့အကြောင်း ဆက်ပြောလို့ရတယ်။",
 
-        "အဲ့အကြောင်းကို Xiao Yu နဲ့ "
-        "ဆက်ပြောလို့ရတယ်နော် 🤭❤️",
+        "ဟွန့် 😝 နင်ကလည်း ပြောတတ်လိုက်တာ။",
 
     ]
 
@@ -992,16 +1200,18 @@ def local_fallback_reply(
 
 
 # ============================================================
-# BUILD GEMINI HISTORY
+# BUILD CONVERSATION PROMPT
 # ============================================================
 
-def build_gemini_history(
+def build_conversation_prompt(
     history
 ):
 
-    contents = []
+    recent_history = history[-16:]
 
-    for item in history:
+    conversation_lines = []
+
+    for item in recent_history:
 
         role = item.get(
             "role",
@@ -1011,28 +1221,42 @@ def build_gemini_history(
         text = item.get(
             "text",
             ""
-        )
+        ).strip()
 
         if not text:
             continue
 
         if role == "assistant":
-            gemini_role = "model"
+            label = "Xiao Yu"
         else:
-            gemini_role = "user"
+            label = "User"
 
-        contents.append(
-            types.Content(
-                role=gemini_role,
-                parts=[
-                    types.Part.from_text(
-                        text=text
-                    )
-                ],
-            )
+        conversation_lines.append(
+            f"{label}: {text}"
         )
 
-    return contents
+    conversation = "\n".join(
+        conversation_lines
+    )
+
+    return (
+        SYSTEM_INSTRUCTION
+        + "\n\n"
+        + "============================================================\n"
+        + "RECENT CONVERSATION\n"
+        + "============================================================\n"
+        + conversation
+        + "\n\n"
+        + "============================================================\n"
+        + "LATEST USER MESSAGE\n"
+        + "============================================================\n"
+        + history[-1]["text"]
+        + "\n\n"
+        + "Answer the latest user message directly."
+        + "\nDo not answer an older message."
+        + "\nDo not use a generic fallback phrase."
+        + "\nStay in character as Xiao Yu."
+    )
 
 
 # ============================================================
@@ -1050,7 +1274,7 @@ async def gemini_reply(
         []
     )
 
-    # Add latest user message
+    # Add user message
     history.append(
         {
             "role": "user",
@@ -1058,12 +1282,16 @@ async def gemini_reply(
         }
     )
 
-    # Keep recent context only
+    # Keep only recent messages
     history = history[-20:]
 
     context.user_data[
         "chat_history"
     ] = history
+
+    # ========================================================
+    # GEMINI NOT AVAILABLE
+    # ========================================================
 
     if gemini_client is None:
 
@@ -1088,9 +1316,13 @@ async def gemini_reply(
 
         return answer
 
+    # ========================================================
+    # GEMINI REQUEST
+    # ========================================================
+
     try:
 
-        contents = build_gemini_history(
+        prompt = build_conversation_prompt(
             history
         )
 
@@ -1102,19 +1334,13 @@ async def gemini_reply(
 
                 model=GEMINI_MODEL,
 
-                contents=contents,
+                contents=prompt,
 
                 config=types.GenerateContentConfig(
 
-                    system_instruction=(
-                        SYSTEM_INSTRUCTION
-                    ),
-
-                    temperature=0.9,
+                    system_instruction=SYSTEM_INSTRUCTION,
 
                     max_output_tokens=600,
-
-                    candidate_count=1,
 
                 ),
             ),
@@ -1139,7 +1365,10 @@ async def gemini_reply(
                 "Gemini returned empty response"
             )
 
-        # Save only successful AI answer
+        # ====================================================
+        # SUCCESS
+        # ====================================================
+
         history.append(
             {
                 "role": "assistant",
@@ -1165,10 +1394,9 @@ async def gemini_reply(
             repr(error)
         )
 
-        # Important:
-        # Do not retry 3 times blindly.
-        # One clean request + intelligent fallback
-        # prevents unnecessary delays and repeated failures.
+        # ====================================================
+        # SMART FALLBACK
+        # ====================================================
 
         answer = local_fallback_reply(
             user_text
@@ -1189,7 +1417,7 @@ async def gemini_reply(
 
 
 # ============================================================
-# SEND LONG TEXT SAFELY
+# SEND LONG TEXT
 # ============================================================
 
 async def send_long_text(
@@ -1260,7 +1488,6 @@ async def start(
 
     user_id = update.effective_user.id
 
-    # Reset temporary modes
     context.user_data[
         "search_mode"
     ] = False
@@ -1269,7 +1496,7 @@ async def start(
         "ai_mode"
     ] = False
 
-    # Membership gate first
+    # Membership gate
     if not await is_member(
         context.bot,
         user_id
@@ -1323,7 +1550,7 @@ async def start(
 
 
 # ============================================================
-# RESET AI MEMORY
+# /RESET
 # ============================================================
 
 async def reset_ai(
@@ -1367,7 +1594,10 @@ async def button_handler(
 
     data = query.data
 
-    # Membership check
+    # ========================================================
+    # CHECK MEMBERSHIP
+    # ========================================================
+
     if data == "check_membership":
 
         if await is_member(
@@ -1393,7 +1623,10 @@ async def button_handler(
 
         return
 
-    # Master gate
+    # ========================================================
+    # MASTER GATE
+    # ========================================================
+
     if not await is_member(
         context.bot,
         user_id
@@ -1407,7 +1640,10 @@ async def button_handler(
 
         return
 
-    # Main menu
+    # ========================================================
+    # MAIN MENU
+    # ========================================================
+
     if data == "main_menu":
 
         context.user_data[
@@ -1425,7 +1661,10 @@ async def button_handler(
 
         return
 
-    # Movies
+    # ========================================================
+    # MOVIES
+    # ========================================================
+
     if data == "movies":
 
         context.user_data[
@@ -1448,7 +1687,10 @@ async def button_handler(
 
         return
 
-    # Search
+    # ========================================================
+    # SEARCH
+    # ========================================================
+
     if data == "search_movie":
 
         context.user_data[
@@ -1468,7 +1710,10 @@ async def button_handler(
 
         return
 
-    # Categories
+    # ========================================================
+    # CATEGORIES
+    # ========================================================
+
     if data == "categories":
 
         context.user_data[
@@ -1488,7 +1733,10 @@ async def button_handler(
 
         return
 
-    # Category
+    # ========================================================
+    # CATEGORY
+    # ========================================================
+
     if data.startswith(
         "cat_"
     ):
@@ -1531,7 +1779,10 @@ async def button_handler(
 
         return
 
-    # AI
+    # ========================================================
+    # AI CHAT
+    # ========================================================
+
     if data == "ai_chat":
 
         context.user_data[
@@ -1577,7 +1828,7 @@ async def message_handler(
     text = update.message.text.strip()
 
     # ========================================================
-    # MASTER MEMBERSHIP GATE
+    # MEMBERSHIP
     # ========================================================
 
     if not await is_member(
@@ -1625,6 +1876,7 @@ async def message_handler(
         "ai_mode"
     ):
 
+        # Character shortcuts first
         if await handle_special_reply(
             update,
             text
@@ -1754,6 +2006,12 @@ async def main():
             "BOT_TOKEN is missing"
         )
 
+    if not GEMINI_API_KEY:
+
+        print(
+            "WARNING: GEMINI_API_KEY is missing."
+        )
+
     main_loop = (
         asyncio.get_running_loop()
     )
@@ -1765,7 +2023,10 @@ async def main():
         .build()
     )
 
-    # /start
+    # ========================================================
+    # HANDLERS
+    # ========================================================
+
     telegram_application.add_handler(
         CommandHandler(
             "start",
@@ -1773,7 +2034,6 @@ async def main():
         )
     )
 
-    # /reset
     telegram_application.add_handler(
         CommandHandler(
             "reset",
@@ -1781,14 +2041,12 @@ async def main():
         )
     )
 
-    # Buttons
     telegram_application.add_handler(
         CallbackQueryHandler(
             button_handler
         )
     )
 
-    # Text messages
     telegram_application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -1799,6 +2057,10 @@ async def main():
     print(
         "Telegram handlers added."
     )
+
+    # ========================================================
+    # START TELEGRAM
+    # ========================================================
 
     await telegram_application.initialize()
 
@@ -1812,7 +2074,15 @@ async def main():
         "Telegram application started."
     )
 
+    # ========================================================
+    # HTTP SERVER
+    # ========================================================
+
     start_http_server()
+
+    # ========================================================
+    # WEBHOOK
+    # ========================================================
 
     webhook_url = (
         f"{RENDER_URL}"
@@ -1832,6 +2102,10 @@ async def main():
     print(
         "Telegram webhook set successfully."
     )
+
+    # ========================================================
+    # BOT INFO
+    # ========================================================
 
     me = await telegram_application.bot.get_me()
 
@@ -1861,6 +2135,7 @@ async def main():
         "========================================"
     )
 
+    # Keep service alive
     await asyncio.Event().wait()
 
 

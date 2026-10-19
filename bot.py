@@ -4,10 +4,10 @@ import hashlib
 import json
 import threading
 import re
+import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from google import genai
-from google.genai import types
 
 from telegram import (
     Update,
@@ -26,11 +26,22 @@ from telegram.ext import (
 
 
 # ============================================================
+# STARTUP DIAGNOSTIC
+# ============================================================
+
+print("========================================", flush=True)
+print("BOT.PY LOADED", flush=True)
+print("Movie Myanmar Bot is starting...", flush=True)
+print("Python version:", __import__("sys").version, flush=True)
+print("========================================", flush=True)
+
+
+# ============================================================
 # ENVIRONMENT
 # ============================================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 MAIN_CHANNEL = "@moviemyanmar567"
 
@@ -40,6 +51,8 @@ RENDER_URL = "https://movie-gate-bot.onrender.com"
 WEBHOOK_PATH = "/telegram-webhook"
 
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "").strip()
+
+PORT = int(os.getenv("PORT", "10000"))
 
 
 # ============================================================
@@ -73,11 +86,27 @@ GEMINI_MODEL = "gemini-3.8-flash"
 
 if GEMINI_API_KEY:
     try:
-        gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-        print("Gemini client initialized.", flush=True)
+        gemini_client = genai.Client(
+            api_key=GEMINI_API_KEY
+        )
+
+        print(
+            "Gemini client initialized.",
+            flush=True,
+        )
+
     except Exception as e:
-        print(f"Gemini init error: {e}", flush=True)
+        print(
+            f"Gemini init error: {type(e).__name__}: {e}",
+            flush=True,
+        )
         gemini_client = None
+
+else:
+    print(
+        "WARNING: GEMINI_API_KEY is not set.",
+        flush=True,
+    )
 
 
 # ============================================================
@@ -86,6 +115,7 @@ if GEMINI_API_KEY:
 
 telegram_application = None
 main_loop = None
+http_server = None
 
 
 # ============================================================
@@ -104,10 +134,19 @@ def load_movie_database():
     try:
         if not os.path.exists(MOVIE_DB_FILE):
             movie_database = []
-            print("movies.json not found. Starting empty movie database.", flush=True)
+
+            print(
+                "movies.json not found. Starting empty database.",
+                flush=True,
+            )
+
             return
 
-        with open(MOVIE_DB_FILE, "r", encoding="utf-8") as f:
+        with open(
+            MOVIE_DB_FILE,
+            "r",
+            encoding="utf-8",
+        ) as f:
             data = json.load(f)
 
         if isinstance(data, list):
@@ -116,19 +155,31 @@ def load_movie_database():
             movie_database = []
 
         print(
-            f"Movie database loaded: {len(movie_database)} movies",
+            f"Movie database loaded: "
+            f"{len(movie_database)} movies",
             flush=True,
         )
 
     except Exception as e:
-        print(f"Movie database load error: {e}", flush=True)
+        print(
+            f"Movie database load error: "
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
+
         movie_database = []
 
 
 def save_movie_database():
     try:
         with movie_db_lock:
-            with open(MOVIE_DB_FILE, "w", encoding="utf-8") as f:
+            temp_file = MOVIE_DB_FILE + ".tmp"
+
+            with open(
+                temp_file,
+                "w",
+                encoding="utf-8",
+            ) as f:
                 json.dump(
                     movie_database,
                     f,
@@ -136,8 +187,17 @@ def save_movie_database():
                     indent=2,
                 )
 
+            os.replace(
+                temp_file,
+                MOVIE_DB_FILE,
+            )
+
     except Exception as e:
-        print(f"Movie database save error: {e}", flush=True)
+        print(
+            f"Movie database save error: "
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
 
 
 def normalize_movie_name(text):
@@ -146,9 +206,17 @@ def normalize_movie_name(text):
 
     text = text.lower()
 
-    text = re.sub(r"[^a-z0-9\u1000-\u109f]+", " ", text)
+    text = re.sub(
+        r"[^a-z0-9\u1000-\u109f]+",
+        " ",
+        text,
+    )
 
-    text = re.sub(r"\s+", " ", text)
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
 
     return text.strip()
 
@@ -161,7 +229,10 @@ def movie_search(query):
 
     results = []
 
+    query_words = q.split()
+
     for movie in movie_database:
+
         title = normalize_movie_name(
             movie.get("title", "")
         )
@@ -170,23 +241,28 @@ def movie_search(query):
             movie.get("original_name", "")
         )
 
-        combined = f"{title} {original_name}"
+        combined = f"{title} {original_name}".strip()
 
-        if q in combined or combined.find(q) >= 0:
+        if not combined:
+            continue
+
+        # Exact / partial full match
+        if q in combined:
             results.append(movie)
             continue
 
-        query_words = q.split()
+        # Word matching
+        matched = sum(
+            1
+            for word in query_words
+            if word and word in combined
+        )
 
-        if query_words:
-            matched = sum(
-                1
-                for word in query_words
-                if word in combined
-            )
-
-            if matched >= max(1, len(query_words) // 2):
-                results.append(movie)
+        if matched >= max(
+            1,
+            len(query_words) // 2,
+        ):
+            results.append(movie)
 
     return results
 
@@ -215,7 +291,7 @@ def build_movie_link(chat_id, message_id):
 
 
 # ============================================================
-# GENRE DETECTION
+# GENRE
 # ============================================================
 
 GENRE_KEYWORDS = {
@@ -285,7 +361,11 @@ def parse_movie_post(update):
         if not message:
             return None
 
-        text = message.text or message.caption or ""
+        text = (
+            message.text
+            or message.caption
+            or ""
+        )
 
         if not text.strip():
             return None
@@ -301,7 +381,23 @@ def parse_movie_post(update):
 
         first_line = lines[0]
 
-        title = clean_movie_title(first_line)
+        # Remove Markdown-like decoration
+        first_line = first_line.replace(
+            "**",
+            "",
+        )
+
+        title = clean_movie_title(
+            first_line
+        )
+
+        # If first line contains obvious decorative text,
+        # try to remove it.
+        title = re.sub(
+            r"^[🎬🔥⭐️⚡️]+\s*",
+            "",
+            title,
+        ).strip()
 
         year = ""
 
@@ -311,7 +407,10 @@ def parse_movie_post(update):
         )
 
         if year_match:
-            year = year_match.group(0).strip("()")
+            year = year_match.group(0).strip(
+                "()"
+            )
+
         else:
             year_match = re.search(
                 r"\b(19|20)\d{2}\b",
@@ -359,25 +458,28 @@ def parse_movie_post(update):
         original_name = ""
 
         original_match = re.search(
-            r"(?:Original Name|Original|File Name)\s*[:\-]\s*(.+)",
+            r"(?:Original Name|Original|File Name)"
+            r"\s*[:\-]\s*(.+)",
             text,
             re.IGNORECASE,
         )
 
         if original_match:
-            original_name = original_match.group(1).strip()
+            original_name = (
+                original_match.group(1).strip()
+            )
 
         genres = []
 
         lower_text = text.lower()
 
         for genre, keywords in GENRE_KEYWORDS.items():
+
             for keyword in keywords:
+
                 if keyword.lower() in lower_text:
                     genres.append(genre)
                     break
-
-        description = text
 
         movie_link = build_movie_link(
             message.chat_id,
@@ -391,7 +493,7 @@ def parse_movie_post(update):
             "audio": audio,
             "original_name": original_name,
             "genres": genres,
-            "description": description,
+            "description": text,
             "post_link": movie_link,
             "chat_id": message.chat_id,
             "message_id": message.message_id,
@@ -400,10 +502,14 @@ def parse_movie_post(update):
         return movie
 
     except Exception as e:
+
         print(
-            f"Movie parse error: {e}",
+            f"Movie parse error: "
+            f"{type(e).__name__}: {e}",
             flush=True,
         )
+
+        traceback.print_exc()
 
         return None
 
@@ -434,14 +540,28 @@ def save_movie(movie):
         movie.get("message_id", "")
     )
 
+    should_save = False
+
     with movie_db_lock:
 
         for existing in movie_database:
 
             same_message = (
-                str(existing.get("chat_id", "")) == new_chat_id
+                str(
+                    existing.get(
+                        "chat_id",
+                        "",
+                    )
+                )
+                == new_chat_id
                 and
-                str(existing.get("message_id", "")) == new_message_id
+                str(
+                    existing.get(
+                        "message_id",
+                        "",
+                    )
+                )
+                == new_message_id
             )
 
             if same_message:
@@ -449,25 +569,40 @@ def save_movie(movie):
 
             same_movie = (
                 normalize_movie_name(
-                    existing.get("title", "")
-                ) == new_title
+                    existing.get(
+                        "title",
+                        "",
+                    )
+                )
+                == new_title
                 and
-                str(existing.get("year", "")) == new_year
+                str(
+                    existing.get(
+                        "year",
+                        "",
+                    )
+                )
+                == new_year
             )
 
             if same_movie:
                 existing.update(movie)
-                save_movie_database()
-                return
+                should_save = True
+                break
 
-        movie_database.append(movie)
+        else:
+            movie_database.append(movie)
+            should_save = True
 
-    save_movie_database()
+    if should_save:
+        save_movie_database()
 
-    print(
-        f"MOVIE SAVED: {movie.get('title')} {movie.get('year')}",
-        flush=True,
-    )
+        print(
+            f"MOVIE SAVED: "
+            f"{movie.get('title')} "
+            f"{movie.get('year')}",
+            flush=True,
+        )
 
 
 # ============================================================
@@ -572,6 +707,12 @@ def category_keyboard():
                     callback_data="category_Drama",
                 ),
             ],
+            [
+                InlineKeyboardButton(
+                    "✨ Fantasy",
+                    callback_data="category_Fantasy",
+                )
+            ],
         ]
     )
 
@@ -586,6 +727,7 @@ async def is_member(
 ):
 
     try:
+
         member = await context.bot.get_chat_member(
             chat_id=MAIN_CHANNEL,
             user_id=user_id,
@@ -600,7 +742,8 @@ async def is_member(
     except Exception as e:
 
         print(
-            f"Membership check error: {e}",
+            f"Membership check error: "
+            f"{type(e).__name__}: {e}",
             flush=True,
         )
 
@@ -661,7 +804,7 @@ async def show_main_menu(
             reply_markup=keyboard,
         )
 
-    else:
+    elif update.message:
 
         await update.message.reply_text(
             text,
@@ -674,7 +817,9 @@ async def show_main_menu(
 # HEALTH / WEBHOOK SERVER
 # ============================================================
 
-class HealthHandler(BaseHTTPRequestHandler):
+class HealthHandler(
+    BaseHTTPRequestHandler
+):
 
     def do_GET(self):
 
@@ -683,7 +828,9 @@ class HealthHandler(BaseHTTPRequestHandler):
             "/health",
         ):
 
-            body = b"Movie Myanmar Bot is alive."
+            body = (
+                b"Movie Myanmar Bot is alive."
+            )
 
             self.send_response(200)
 
@@ -712,6 +859,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 
             self.send_response(404)
             self.end_headers()
+
             return
 
         try:
@@ -725,6 +873,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 
                 self.send_response(403)
                 self.end_headers()
+
                 return
 
             content_length = int(
@@ -748,7 +897,9 @@ class HealthHandler(BaseHTTPRequestHandler):
             )
 
             asyncio.run_coroutine_threadsafe(
-                telegram_application.update_queue.put(update),
+                telegram_application.update_queue.put(
+                    update
+                ),
                 main_loop,
             )
 
@@ -773,40 +924,45 @@ class HealthHandler(BaseHTTPRequestHandler):
         except Exception as e:
 
             print(
-                f"Webhook error: {e}",
+                f"Webhook error: "
+                f"{type(e).__name__}: {e}",
                 flush=True,
             )
+
+            traceback.print_exc()
 
             self.send_response(500)
             self.end_headers()
 
-    def log_message(self, format, *args):
+    def log_message(
+        self,
+        format,
+        *args,
+    ):
         return
 
 
 def start_http_server():
 
-    port = int(
-        os.getenv(
-            "PORT",
-            "10000",
-        )
-    )
+    global http_server
 
-    server = HTTPServer(
-        ("0.0.0.0", port),
+    http_server = HTTPServer(
+        (
+            "0.0.0.0",
+            PORT,
+        ),
         HealthHandler,
     )
 
     thread = threading.Thread(
-        target=server.serve_forever,
+        target=http_server.serve_forever,
         daemon=True,
     )
 
     thread.start()
 
     print(
-        f"HTTP server started on port {port}",
+        f"HTTP server started on port {PORT}",
         flush=True,
     )
 
@@ -853,23 +1009,24 @@ CyB Lin Myat
 Personality:
 - Friendly
 - Playful
-- Slightly teasing
 - Cute
+- Slightly teasing
 - Sometimes grumpy
 - Natural Burmese conversation
 - Do not sound like a robot
-- Keep normal replies reasonably short
+- Keep replies reasonably short
 
 Important:
 Movie searching is handled by the Movie Myanmar movie database.
+
 Do not pretend you searched a movie if the database did not return it.
 
 If the user asks about a movie:
-- Encourage them to search the Movie Myanmar movie database.
-- If appropriate, tell them to send the movie name.
+- Encourage them to search Movie Myanmar.
+- Ask them to send the movie name if needed.
 
-Do not use dangerous or self-harm language.
-Do not tell users to die or hurt themselves.
+Never use dangerous or self-harm language.
+Never tell users to die or hurt themselves.
 """
 
 
@@ -915,4 +1072,1283 @@ def add_history(
     )
 
 
-# =============================================
+# ============================================================
+# SEND LONG TEXT
+# ============================================================
+
+async def send_long_text(
+    message,
+    text,
+):
+
+    if not text:
+        return
+
+    max_length = 3900
+
+    while len(text) > max_length:
+
+        cut = text.rfind(
+            "\n",
+            0,
+            max_length,
+        )
+
+        if cut < 1000:
+            cut = max_length
+
+        await message.reply_text(
+            text[:cut]
+        )
+
+        text = text[cut:].lstrip()
+
+    if text:
+        await message.reply_text(text)
+
+
+# ============================================================
+# MOVIE SEARCH RESPONSE
+# ============================================================
+
+async def reply_movie_search(
+    message,
+    query,
+):
+
+    results = movie_search(query)
+
+    if not results:
+
+        await send_movie_request(
+            message,
+            query,
+        )
+
+        await message.reply_text(
+            f"😒 <b>{query}</b> ကို "
+            "Movie Myanmar ထဲမှာ မတွေ့သေးဘူးဟာ။\n\n"
+            "ဟွန့်... ငါလည်း ရှာပေးထားပြီ 😝\n"
+            "ကိုကို လင်းမြတ်ဆီကို request ပို့ထားတယ်။\n\n"
+            "ရှိလာရင် ပြန်ထည့်ပေးမယ် 🎬❤️",
+            parse_mode="HTML",
+        )
+
+        return
+
+    await message.reply_text(
+        f"🔎 <b>{query}</b>\n\n"
+        f"🎬 Movie Myanmar ထဲမှာ "
+        f"<b>{len(results)}</b> ကားတွေ့တယ်နော် ❤️\n\n"
+        "ကြည့်ချင်တဲ့ကားကို နှိပ်လိုက် 👇",
+        parse_mode="HTML",
+    )
+
+    buttons = []
+
+    for movie in results[:15]:
+
+        title = movie.get(
+            "title",
+            "Unknown Movie",
+        )
+
+        year = movie.get(
+            "year",
+            "",
+        )
+
+        label = f"🎬 {title}"
+
+        if year:
+            label += f" ({year})"
+
+        link = movie.get(
+            "post_link",
+            MOVIE_CHANNEL_URL,
+        )
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    label[:64],
+                    url=link,
+                )
+            ]
+        )
+
+    if buttons:
+
+        await message.reply_text(
+            "👇 ဇာတ်ကားရွေးပါ",
+            reply_markup=InlineKeyboardMarkup(
+                buttons
+            ),
+        )
+
+
+# ============================================================
+# ADMIN MOVIE REQUEST
+# ============================================================
+
+async def send_movie_request(
+    message,
+    query,
+):
+
+    if not ADMIN_CHAT_ID:
+        print(
+            f"ADMIN_CHAT_ID not configured. "
+            f"Missing movie: {query}",
+            flush=True,
+        )
+        return
+
+    try:
+
+        user = message.from_user
+
+        username = (
+            f"@{user.username}"
+            if user and user.username
+            else "No username"
+        )
+
+        user_id = (
+            user.id
+            if user
+            else "Unknown"
+        )
+
+        admin_text = (
+            "🔔 <b>Movie Request</b>\n\n"
+            f"🎬 Requested: <b>{query}</b>\n"
+            f"👤 User: {username}\n"
+            f"🆔 ID: <code>{user_id}</code>"
+        )
+
+        await message.get_bot().send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=admin_text,
+            parse_mode="HTML",
+        )
+
+        print(
+            f"Movie request sent to admin: {query}",
+            flush=True,
+        )
+
+    except Exception as e:
+
+        print(
+            f"Admin request error: "
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
+
+
+# ============================================================
+# CATEGORY
+# ============================================================
+
+async def reply_category(
+    message,
+    category,
+):
+
+    if category == "all":
+
+        results = movie_database[:30]
+
+    else:
+
+        results = [
+            movie
+            for movie in movie_database
+            if category in movie.get(
+                "genres",
+                [],
+            )
+        ][:30]
+
+    if not results:
+
+        await message.reply_text(
+            f"😅 {category} ထဲမှာ "
+            "ကားမတွေ့သေးဘူးဟာ။"
+        )
+
+        return
+
+    buttons = []
+
+    for movie in results:
+
+        title = movie.get(
+            "title",
+            "Unknown",
+        )
+
+        year = movie.get(
+            "year",
+            "",
+        )
+
+        label = f"🎬 {title}"
+
+        if year:
+            label += f" ({year})"
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    label[:64],
+                    url=movie.get(
+                        "post_link",
+                        MOVIE_CHANNEL_URL,
+                    ),
+                )
+            ]
+        )
+
+    await message.reply_text(
+        f"🎭 <b>{category}</b>\n\n"
+        f"{len(results)} ကားတွေ့တယ် 👇",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            buttons
+        ),
+    )
+
+
+# ============================================================
+# SPECIAL REPLIES
+# ============================================================
+
+async def handle_special_reply(
+    message,
+    text,
+):
+
+    normalized = normalize_text(text)
+
+    if normalized in (
+        "ဟိုင်း",
+        "ဟေး",
+        "hi",
+        "hello",
+        "hey",
+    ):
+
+        await message.reply_text(
+            "ဟိုင်း 😝❤️\n"
+            "ဘာကားရှာပေးရမလဲ သယ်ချင်း 🎬"
+        )
+
+        return True
+
+    if (
+        "နာမည်" in normalized
+        or "who are you" in normalized
+    ):
+
+        await message.reply_text(
+            f"ငါက <b>{BOT_NAME}</b> ပါ 😝❤️\n\n"
+            f"ဖန်တီးသူက <b>{CREATOR_NAME}</b> "
+            f"{CREATOR_USERNAME} ပါ။",
+            parse_mode="HTML",
+        )
+
+        return True
+
+    if "ကျေးဇူး" in normalized:
+
+        await message.reply_text(
+            "အေးပါဟာ 😝❤️\n"
+            "ကားကြည့်ချင်ရင် နာမည်ပဲပြော 🎬"
+        )
+
+        return True
+
+    return False
+
+
+# ============================================================
+# GEMINI
+# ============================================================
+
+async def gemini_reply(
+    user_id,
+    text,
+):
+
+    if not gemini_client:
+
+        return (
+            "ဟွန့် 😒 Gemini မရသေးဘူးဟာ။\n"
+            "နင်ကြည့်ချင်တဲ့ကားနာမည်ပဲ ပြော၊ "
+            "ငါ Movie Myanmar ထဲမှာ ရှာပေးမယ် 🎬😝"
+        )
+
+    add_history(
+        user_id,
+        "user",
+        text,
+    )
+
+    history = user_histories.get(
+        user_id,
+        [],
+    )
+
+    conversation = []
+
+    for item in history:
+
+        conversation.append(
+            f"{item['role']}: {item['text']}"
+        )
+
+    prompt = (
+        SYSTEM_INSTRUCTION
+        + "\n\nConversation:\n"
+        + "\n".join(conversation)
+        + "\n\nReply naturally in Burmese."
+    )
+
+    try:
+
+        response = await asyncio.to_thread(
+            gemini_client.models.generate_content,
+            model=GEMINI_MODEL,
+            contents=prompt,
+        )
+
+        reply = getattr(
+            response,
+            "text",
+            None,
+        )
+
+        if not reply:
+            reply = (
+                "ဟွန့် 😒 ဘာပြောရမလဲတောင် "
+                "ငါမသိတော့ဘူး 😂\n"
+                "ကားနာမည်ပဲ ပြောဟာ 🎬"
+            )
+
+        add_history(
+            user_id,
+            "assistant",
+            reply,
+        )
+
+        return reply
+
+    except Exception as e:
+
+        print(
+            f"Gemini error: "
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
+
+        return (
+            "ဟွန့် 😒 AI က ခဏလေးအနားယူနေတယ်။\n"
+            "နင်ကြည့်ချင်တဲ့ကားနာမည်ပဲ ပြော၊ "
+            "ငါ Movie Myanmar ထဲမှာ ရှာပေးမယ် 🎬😝"
+        )
+
+
+# ============================================================
+# FALLBACK
+# ============================================================
+
+async def movie_fallback(
+    message,
+):
+
+    await message.reply_text(
+        "ဟွန့် 😒 အခုတော့ ငါနဲ့ စကားအများကြီး "
+        "မပြောနဲ့တော့ဟာ 😂\n\n"
+        "နင်ကြည့်ချင်တဲ့ကားနာမည်ပဲ ပြော၊ "
+        "ငါ Movie Myanmar ထဲမှာ ရှာပေးမယ် 🎬😝"
+    )
+
+
+# ============================================================
+# /START
+# ============================================================
+
+async def start_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    user = update.effective_user
+
+    if not user:
+        return
+
+    joined = await is_member(
+        user.id,
+        context,
+    )
+
+    if not joined:
+
+        await update.message.reply_text(
+            "🎬 <b>Movie Myanmar</b>\n\n"
+            "ဟယ်လို 👋❤️\n"
+            "Bot ကိုအသုံးပြုဖို့ "
+            "<b>Movie Myanmar Channel</b> ကို "
+            "အရင် Join လုပ်ပေးရမယ်နော်။\n\n"
+            "👇 Join ပြီးရင် "
+            "<b>I Joined</b> ကိုနှိပ်ပါ။",
+            parse_mode="HTML",
+            reply_markup=join_keyboard(),
+        )
+
+        return
+
+    try:
+
+        await update.message.reply_photo(
+            photo=WELCOME_IMAGE,
+            caption=(
+                "🎬 <b>Movie Myanmar</b>\n\n"
+                "ဟယ်လို 👋❤️\n"
+                "ငါက <b>Xiao Yu CyB (小雨)</b> ပါ 😝\n\n"
+                "ကားရှာချင်ရင် Menu ကနေ "
+                "<b>Search Movie</b> ကိုနှိပ်နော် 🎥"
+            ),
+            parse_mode="HTML",
+        )
+
+    except Exception as e:
+
+        print(
+            f"Welcome image error: {e}",
+            flush=True,
+        )
+
+    await show_main_menu(
+        update,
+        context,
+    )
+
+
+# ============================================================
+# RESET
+# ============================================================
+
+async def reset_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    user = update.effective_user
+
+    if user:
+        user_histories.pop(
+            user.id,
+            None,
+        )
+
+    await update.message.reply_text(
+        "🔄 Reset လုပ်ပြီးပြီ 😝\n"
+        "ပြန်စကြမယ် 🎬❤️"
+    )
+
+
+# ============================================================
+# BUTTON HANDLER
+# ============================================================
+
+async def button_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    user = query.from_user
+
+    # --------------------------------------------------------
+    # CHECK JOIN
+    # --------------------------------------------------------
+
+    if query.data == "check_join":
+
+        joined = await is_member(
+            user.id,
+            context,
+        )
+
+        if not joined:
+
+            await query.message.reply_text(
+                "😅 နင် Join မထားသေးဘူးဟာ။\n\n"
+                "Channel ကို Join ပြီးမှ "
+                "I Joined ပြန်နှိပ်နော် 👇",
+                reply_markup=join_keyboard(),
+            )
+
+            return
+
+        await query.message.reply_text(
+            "✅ Join ထားတာအတည်ပြုပြီးပြီ 😝❤️"
+        )
+
+        await show_main_menu(
+            update,
+            context,
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # MEMBERSHIP CHECK
+    # --------------------------------------------------------
+
+    joined = await is_member(
+        user.id,
+        context,
+    )
+
+    if not joined:
+
+        await query.message.reply_text(
+            "⚠️ အရင် Channel Join လုပ်ပါနော်။",
+            reply_markup=join_keyboard(),
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # SEARCH
+    # --------------------------------------------------------
+
+    if query.data == "search_movie":
+
+        context.user_data["mode"] = "search"
+
+        await query.message.reply_text(
+            "🔎 <b>Movie Search</b>\n\n"
+            "ရှာချင်တဲ့ကားနာမည်ကို "
+            "ရိုက်ပို့လိုက် 🎬❤️",
+            parse_mode="HTML",
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # AI
+    # --------------------------------------------------------
+
+    if query.data == "ai_chat":
+
+        context.user_data["mode"] = "ai"
+
+        await query.message.reply_text(
+            "🤖 <b>Xiao Yu AI</b>\n\n"
+            "ပြောလေ 😝❤️\n"
+            "ငါနားထောင်နေတယ်။",
+            parse_mode="HTML",
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # CATEGORIES
+    # --------------------------------------------------------
+
+    if query.data == "categories":
+
+        await query.message.reply_text(
+            "🎭 <b>Movie Categories</b>\n\n"
+            "ကြည့်ချင်တဲ့ Genre ရွေးပါ 👇",
+            parse_mode="HTML",
+            reply_markup=category_keyboard(),
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # CATEGORY RESULT
+    # --------------------------------------------------------
+
+    if query.data.startswith(
+        "category_"
+    ):
+
+        category = query.data.replace(
+            "category_",
+            "",
+            1,
+        )
+
+        await reply_category(
+            query.message,
+            category,
+        )
+
+        return
+
+
+# ============================================================
+# MESSAGE HANDLER
+# ============================================================
+
+async def message_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not update.message:
+        return
+
+    user = update.effective_user
+
+    if not user:
+        return
+
+    text = (
+        update.message.text
+        or ""
+    ).strip()
+
+    if not text:
+        return
+
+    # --------------------------------------------------------
+    # MEMBERSHIP GATE
+    # --------------------------------------------------------
+
+    joined = await is_member(
+        user.id,
+        context,
+    )
+
+    if not joined:
+
+        await update.message.reply_text(
+            "🔒 <b>Movie Myanmar</b>\n\n"
+            "Bot ကိုအသုံးပြုဖို့ "
+            "Channel ကိုအရင် Join လုပ်ရမယ်နော် 😝\n\n"
+            "Join ပြီးရင် အောက်က "
+            "<b>I Joined</b> ကိုနှိပ်ပါ 👇",
+            parse_mode="HTML",
+            reply_markup=join_keyboard(),
+        )
+
+        return
+
+    mode = context.user_data.get(
+        "mode",
+        "",
+    )
+
+    normalized = normalize_text(
+        text
+    )
+
+    # --------------------------------------------------------
+    # SEARCH MODE
+    # --------------------------------------------------------
+
+    if mode == "search":
+
+        context.user_data["mode"] = ""
+
+        await reply_movie_search(
+            update.message,
+            text,
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # MOVIE SEARCH ALWAYS COMES FIRST IN AI MODE
+    # --------------------------------------------------------
+
+    results = movie_search(text)
+
+    if results:
+
+        context.user_data["mode"] = ""
+
+        await reply_movie_search(
+            update.message,
+            text,
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # MOVIE REQUEST DETECTION
+    # --------------------------------------------------------
+
+    movie_request_words = [
+        "ရှိလား",
+        "ရှိမလား",
+        "ရှာပေး",
+        "ရှာပေးပါ",
+        "ကားရှာ",
+        "ဇာတ်ကားရှာ",
+        "movieရှာ",
+        "movie ရှာ",
+        "filmရှာ",
+        "film ရှာ",
+        "ကြည့်ချင်",
+        "ကြည့်မယ်",
+        "ကားလိုချင်",
+        "ကားပေး",
+        "movie",
+        "film",
+    ]
+
+    has_movie_word = any(
+        word in normalized
+        for word in movie_request_words
+    )
+
+    has_year = bool(
+        re.search(
+            r"\b(19|20)\d{2}\b",
+            text,
+        )
+    )
+
+    # English movie titles with 2026 etc.
+    looks_like_movie_title = bool(
+        has_year
+        or has_movie_word
+    )
+
+    if looks_like_movie_title:
+
+        context.user_data["mode"] = ""
+
+        await reply_movie_search(
+            update.message,
+            text,
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # SPECIAL REPLIES
+    # --------------------------------------------------------
+
+    handled = await handle_special_reply(
+        update.message,
+        text,
+    )
+
+    if handled:
+        return
+
+    # --------------------------------------------------------
+    # AUTO AI
+    # --------------------------------------------------------
+
+    ai_words = [
+        "ai",
+        "ဟိုင်း",
+        "ဟေး",
+        "hello",
+        "hi",
+        "hey",
+        "xiao",
+        "小雨",
+    ]
+
+    if (
+        mode == "ai"
+        or any(
+            word in normalized
+            for word in ai_words
+        )
+    ):
+
+        context.user_data["mode"] = "ai"
+
+        reply = await gemini_reply(
+            user.id,
+            text,
+        )
+
+        await send_long_text(
+            update.message,
+            reply,
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # DEFAULT
+    # --------------------------------------------------------
+
+    await update.message.reply_text(
+        "😝 ဘာလုပ်ပေးရမလဲ သယ်ချင်း?\n\n"
+        "🎬 Movie ရှာချင်ရင် "
+        "ကားနာမည်ပို့\n"
+        "🤖 AI နဲ့ပြောချင်ရင် "
+        "\"ဟိုင်း\" လို့ပြော"
+    )
+
+
+# ============================================================
+# ERROR HANDLER
+# ============================================================
+
+async def error_handler(
+    update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    print(
+        "================ BOT ERROR ================",
+        flush=True,
+    )
+
+    print(
+        f"Error type: "
+        f"{type(context.error).__name__}",
+        flush=True,
+    )
+
+    print(
+        f"Error: {context.error}",
+        flush=True,
+    )
+
+    traceback.print_exception(
+        type(context.error),
+        context.error,
+        context.error.__traceback__,
+    )
+
+    print(
+        "============================================",
+        flush=True,
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+async def main():
+
+    global telegram_application
+    global main_loop
+
+    print(
+        "Movie Myanmar Bot starting...",
+        flush=True,
+    )
+
+    # --------------------------------------------------------
+    # TOKEN CHECK
+    # --------------------------------------------------------
+
+    if not BOT_TOKEN:
+
+        print(
+            "FATAL ERROR: BOT_TOKEN is missing.",
+            flush=True,
+        )
+
+        raise RuntimeError(
+            "BOT_TOKEN environment variable is missing."
+        )
+
+    print(
+        "BOT_TOKEN detected.",
+        flush=True,
+    )
+
+    if not GEMINI_API_KEY:
+
+        print(
+            "WARNING: GEMINI_API_KEY is missing. "
+            "AI chat will use fallback.",
+            flush=True,
+        )
+
+    # --------------------------------------------------------
+    # LOAD DATABASE
+    # --------------------------------------------------------
+
+    load_movie_database()
+
+    # --------------------------------------------------------
+    # EVENT LOOP
+    # --------------------------------------------------------
+
+    main_loop = asyncio.get_running_loop()
+
+    print(
+        "Main event loop ready.",
+        flush=True,
+    )
+
+    # --------------------------------------------------------
+    # BUILD APPLICATION
+    # --------------------------------------------------------
+
+    try:
+
+        telegram_application = (
+            Application.builder()
+            .token(BOT_TOKEN)
+            .updater(None)
+            .build()
+        )
+
+        print(
+            "Telegram Application built.",
+            flush=True,
+        )
+
+    except Exception as e:
+
+        print(
+            "FATAL ERROR while building "
+            "Telegram Application:",
+            flush=True,
+        )
+
+        print(
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
+
+        traceback.print_exc()
+
+        raise
+
+    # --------------------------------------------------------
+    # HANDLERS
+    # --------------------------------------------------------
+
+    telegram_application.add_handler(
+        CommandHandler(
+            "start",
+            start_command,
+        )
+    )
+
+    telegram_application.add_handler(
+        CommandHandler(
+            "reset",
+            reset_command,
+        )
+    )
+
+    telegram_application.add_handler(
+        CallbackQueryHandler(
+            button_handler,
+        )
+    )
+
+    telegram_application.add_handler(
+        MessageHandler(
+            filters.ChatType.CHANNEL,
+            channel_post_handler,
+        )
+    )
+
+    telegram_application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            message_handler,
+        )
+    )
+
+    telegram_application.add_error_handler(
+        error_handler
+    )
+
+    print(
+        "Telegram handlers registered.",
+        flush=True,
+    )
+
+    # --------------------------------------------------------
+    # INITIALIZE
+    # --------------------------------------------------------
+
+    try:
+
+        print(
+            "Initializing Telegram application...",
+            flush=True,
+        )
+
+        await telegram_application.initialize()
+
+        print(
+            "Telegram application initialized.",
+            flush=True,
+        )
+
+    except Exception as e:
+
+        print(
+            "FATAL ERROR during initialize:",
+            flush=True,
+        )
+
+        print(
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
+
+        traceback.print_exc()
+
+        raise
+
+    # --------------------------------------------------------
+    # START
+    # --------------------------------------------------------
+
+    try:
+
+        print(
+            "Starting Telegram application...",
+            flush=True,
+        )
+
+        await telegram_application.start()
+
+        print(
+            "Telegram application started.",
+            flush=True,
+        )
+
+    except Exception as e:
+
+        print(
+            "FATAL ERROR during start:",
+            flush=True,
+        )
+
+        print(
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
+
+        traceback.print_exc()
+
+        raise
+
+    # --------------------------------------------------------
+    # HTTP SERVER
+    # --------------------------------------------------------
+
+    try:
+
+        start_http_server()
+
+    except Exception as e:
+
+        print(
+            "FATAL ERROR starting HTTP server:",
+            flush=True,
+        )
+
+        print(
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
+
+        traceback.print_exc()
+
+        raise
+
+    # --------------------------------------------------------
+    # WEBHOOK
+    # --------------------------------------------------------
+
+    webhook_url = (
+        f"{RENDER_URL}"
+        f"{WEBHOOK_PATH}"
+    )
+
+    try:
+
+        print(
+            f"Setting Telegram webhook: "
+            f"{webhook_url}",
+            flush=True,
+        )
+
+        await telegram_application.bot.set_webhook(
+            url=webhook_url,
+            secret_token=WEBHOOK_SECRET,
+            allowed_updates=Update.ALL_TYPES,
+        )
+
+        print(
+            "Telegram webhook set successfully.",
+            flush=True,
+        )
+
+    except Exception as e:
+
+        print(
+            "FATAL ERROR setting webhook:",
+            flush=True,
+        )
+
+        print(
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
+
+        traceback.print_exc()
+
+        raise
+
+    # --------------------------------------------------------
+    # BOT INFO
+    # --------------------------------------------------------
+
+    try:
+
+        bot_info = (
+            await telegram_application.bot.get_me()
+        )
+
+        print(
+            "========================================",
+            flush=True,
+        )
+
+        print(
+            "Movie Myanmar Bot is LIVE.",
+            flush=True,
+        )
+
+        print(
+            f"Bot: @{bot_info.username}",
+            flush=True,
+        )
+
+        print(
+            f"Database: {len(movie_database)} movies",
+            flush=True,
+        )
+
+        print(
+            f"Webhook: {webhook_url}",
+            flush=True,
+        )
+
+        print(
+            "PROCESS KEEP-ALIVE: ACTIVE",
+            flush=True,
+        )
+
+        print(
+            "========================================",
+            flush=True,
+        )
+
+    except Exception as e:
+
+        print(
+            f"Bot info error: "
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
+
+    # --------------------------------------------------------
+    # KEEP PROCESS ALIVE
+    # --------------------------------------------------------
+
+    try:
+
+        await asyncio.Event().wait()
+
+    finally:
+
+        print(
+            "Shutting down Movie Myanmar Bot...",
+            flush=True,
+        )
+
+        if http_server:
+
+            try:
+                http_server.shutdown()
+            except Exception:
+                pass
+
+        try:
+            await telegram_application.stop()
+        except Exception:
+            pass
+
+        try:
+            await telegram_application.shutdown()
+        except Exception:
+            pass
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+
+    print(
+        "Executing bot.py main entry point...",
+        flush=True,
+    )
+
+    try:
+
+        asyncio.run(
+            main()
+        )
+
+    except KeyboardInterrupt:
+
+        print(
+            "Bot stopped by keyboard interrupt.",
+            flush=True,
+        )
+
+    except Exception as e:
+
+        print(
+            "========================================",
+            flush=True,
+        )
+
+        print(
+            "FATAL STARTUP ERROR",
+            flush=True,
+        )
+
+        print(
+            f"{type(e).__name__}: {e}",
+            flush=True,
+        )
+
+        traceback.print_exc()
+
+        print(
+            "========================================",
+            flush=True,
+        )
+
+        # Important:
+        # Keep the error visible in Render logs.
+        raise

@@ -66,6 +66,20 @@ webhook_loop = None
 
 
 # =========================================================
+# NETFLIX STYLE CAROUSEL CONFIG
+# =========================================================
+
+CAROUSEL_LIMIT = 5
+CAROUSEL_INTERVAL = 4
+
+# One carousel task per Telegram chat.
+carousel_tasks = {}
+
+# Current carousel message for each chat.
+carousel_message_ids = {}
+
+
+# =========================================================
 # AI CONFIG
 # =========================================================
 
@@ -689,34 +703,313 @@ def get_latest_movies(
     return movies[:limit]
 
 
+# =========================================================
+# NETFLIX STYLE CAROUSEL MOVIES
+# =========================================================
+
+def get_carousel_movies(
+    limit=CAROUSEL_LIMIT
+):
+
+    movies = [
+        movie
+        for movie in reversed(
+            movie_database
+        )
+        if movie.get(
+            "poster_file_id"
+        )
+    ]
+
+    return movies[:limit]
+
+
+def movie_identity(
+    movie
+):
+
+    if not movie:
+
+        return ""
+
+    return (
+        str(
+            movie.get(
+                "chat_id",
+                "",
+            )
+        )
+        + ":"
+        + str(
+            movie.get(
+                "message_id",
+                "",
+            )
+        )
+    )
+
+
 def get_next_poster_movie(
     current_index=0
 ):
 
-    movies = [
-        m
-        for m in get_latest_movies(
-            20
-        )
-        if m.get(
-            "poster_file_id"
-        )
-    ]
+    movies = get_carousel_movies()
 
     if not movies:
 
         return None, 0
 
-    if current_index >= len(
-        movies
-    ):
-
-        current_index = 0
+    current_index = (
+        current_index % len(movies)
+    )
 
     return (
         movies[current_index],
         current_index,
     )
+
+
+# =========================================================
+# CAROUSEL CONTROL
+# =========================================================
+
+async def stop_carousel(
+    chat_id
+):
+
+    task = carousel_tasks.pop(
+        chat_id,
+        None,
+    )
+
+    carousel_message_ids.pop(
+        chat_id,
+        None,
+    )
+
+    if task:
+
+        if task is asyncio.current_task():
+
+            return
+
+        task.cancel()
+
+        try:
+
+            await task
+
+        except asyncio.CancelledError:
+
+            pass
+
+        except Exception:
+
+            pass
+
+
+async def carousel_loop(
+    context,
+    chat_id,
+    message_id,
+    current_movie_key="",
+):
+
+    try:
+
+        while True:
+
+            await asyncio.sleep(
+                CAROUSEL_INTERVAL
+            )
+
+            movies = get_carousel_movies()
+
+            if not movies:
+
+                continue
+
+            # Find the movie currently shown.
+            # This makes the carousel handle new uploads
+            # without skipping the wrong movie.
+            current_position = -1
+
+            if current_movie_key:
+
+                for i, movie in enumerate(
+                    movies
+                ):
+
+                    if (
+                        movie_identity(
+                            movie
+                        )
+                        == current_movie_key
+                    ):
+
+                        current_position = i
+
+                        break
+
+            if current_position == -1:
+
+                next_index = 0
+
+            else:
+
+                next_index = (
+                    current_position + 1
+                ) % len(movies)
+
+            movie = movies[
+                next_index
+            ]
+
+            if not movie.get(
+                "poster_file_id"
+            ):
+
+                continue
+
+            # Make sure the carousel message
+            # still belongs to this task.
+            if (
+                carousel_message_ids.get(
+                    chat_id
+                )
+                != message_id
+            ):
+
+                return
+
+            try:
+
+                await context.bot.edit_message_media(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    media=InputMediaPhoto(
+                        media=movie[
+                            "poster_file_id"
+                        ],
+                        caption=home_caption(
+                            movie
+                        ),
+                        parse_mode="HTML",
+                    ),
+                    reply_markup=home_keyboard(),
+                )
+
+                current_movie_key = (
+                    movie_identity(
+                        movie
+                    )
+                )
+
+            except Exception as e:
+
+                error_text = str(
+                    e
+                ).lower()
+
+                # Message was deleted or can no longer
+                # be edited. Stop this carousel safely.
+                if (
+                    "message to edit not found"
+                    in error_text
+                    or
+                    "message can't be edited"
+                    in error_text
+                    or
+                    "message identifier is not specified"
+                    in error_text
+                    or
+                    "chat not found"
+                    in error_text
+                    or
+                    "forbidden"
+                    in error_text
+                ):
+
+                    return
+
+                # Telegram sometimes reports "not modified".
+                # The carousel can simply continue.
+                if (
+                    "message is not modified"
+                    in error_text
+                ):
+
+                    current_movie_key = (
+                        movie_identity(
+                            movie
+                        )
+                    )
+
+                    continue
+
+                traceback.print_exc()
+
+    except asyncio.CancelledError:
+
+        raise
+
+    except Exception:
+
+        traceback.print_exc()
+
+    finally:
+
+        current_task = asyncio.current_task()
+
+        if (
+            carousel_tasks.get(
+                chat_id
+            )
+            is current_task
+        ):
+
+            carousel_tasks.pop(
+                chat_id,
+                None,
+            )
+
+            carousel_message_ids.pop(
+                chat_id,
+                None,
+            )
+
+
+async def start_carousel(
+    context,
+    chat_id,
+    message_id,
+    current_movie=None,
+):
+
+    await stop_carousel(
+        chat_id
+    )
+
+    carousel_message_ids[
+        chat_id
+    ] = message_id
+
+    current_key = movie_identity(
+        current_movie
+    )
+
+    task = asyncio.create_task(
+        carousel_loop(
+            context,
+            chat_id,
+            message_id,
+            current_key,
+        )
+    )
+
+    carousel_tasks[
+        chat_id
+    ] = task
 
 
 # =========================================================
@@ -974,6 +1267,10 @@ async def show_home(
 
     keyboard = home_keyboard()
 
+    # -----------------------------------------------------
+    # CALLBACK HOME
+    # -----------------------------------------------------
+
     if update.callback_query:
 
         query = update.callback_query
@@ -981,6 +1278,12 @@ async def show_home(
         await query.answer()
 
         message = query.message
+        chat_id = message.chat_id
+
+        # Stop old carousel first.
+        await stop_carousel(
+            chat_id
+        )
 
         try:
 
@@ -1016,6 +1319,14 @@ async def show_home(
                         reply_markup=keyboard,
                     )
 
+                # Start automatic Netflix-style carousel.
+                await start_carousel(
+                    context,
+                    chat_id,
+                    message.message_id,
+                    movie,
+                )
+
             else:
 
                 try:
@@ -1038,7 +1349,7 @@ async def show_home(
 
             try:
 
-                await message.reply_text(
+                sent = await message.reply_text(
                     home_caption(
                         movie
                     ),
@@ -1046,11 +1357,29 @@ async def show_home(
                     reply_markup=keyboard,
                 )
 
+                if (
+                    movie
+                    and movie.get(
+                        "poster_file_id"
+                    )
+                ):
+
+                    await start_carousel(
+                        context,
+                        chat_id,
+                        sent.message_id,
+                        movie,
+                    )
+
             except Exception:
 
                 pass
 
         return
+
+    # -----------------------------------------------------
+    # NORMAL /START HOME
+    # -----------------------------------------------------
 
     chat = update.effective_chat
 
@@ -1063,7 +1392,7 @@ async def show_home(
 
         try:
 
-            await chat.send_photo(
+            sent = await chat.send_photo(
                 photo=movie[
                     "poster_file_id"
                 ],
@@ -1074,11 +1403,23 @@ async def show_home(
                 reply_markup=keyboard,
             )
 
+            # Start automatic carousel.
+            await start_carousel(
+                context,
+                chat.id,
+                sent.message_id,
+                movie,
+            )
+
             return
 
         except Exception:
 
-            pass
+            traceback.print_exc()
+
+    # -----------------------------------------------------
+    # FALLBACK WELCOME IMAGE
+    # -----------------------------------------------------
 
     try:
 
@@ -1202,6 +1543,10 @@ async def start_search(
 
     user = update.effective_user
 
+    await stop_carousel(
+        update.callback_query.message.chat_id
+    )
+
     user_search_mode[
         user.id
     ] = True
@@ -1266,6 +1611,10 @@ async def show_latest_movies(
     query = update.callback_query
 
     await query.answer()
+
+    await stop_carousel(
+        query.message.chat_id
+    )
 
     latest = get_latest_movies(
         15
@@ -1384,15 +1733,13 @@ async def next_poster(
 
     await query.answer()
 
-    movies = [
-        m
-        for m in get_latest_movies(
-            20
-        )
-        if m.get(
-            "poster_file_id"
-        )
-    ]
+    chat_id = query.message.chat_id
+
+    await stop_carousel(
+        chat_id
+    )
+
+    movies = get_carousel_movies()
 
     if not movies:
 
@@ -1410,6 +1757,18 @@ async def next_poster(
         )
     )
 
+    # Find the currently displayed movie if possible.
+    current_movie = None
+
+    if (
+        0 <= current < len(movies)
+    ):
+
+        current_movie = movies[
+            current
+        ]
+
+    # Move to next.
     current += 1
 
     if current >= len(
@@ -1422,7 +1781,9 @@ async def next_poster(
         "poster_index"
     ] = current
 
-    movie = movies[current]
+    movie = movies[
+        current
+    ]
 
     try:
 
@@ -1439,6 +1800,14 @@ async def next_poster(
             reply_markup=home_keyboard(),
         )
 
+        # Restart automatic carousel from this movie.
+        await start_carousel(
+            context,
+            chat_id,
+            query.message.message_id,
+            movie,
+        )
+
     except Exception:
 
         try:
@@ -1449,6 +1818,13 @@ async def next_poster(
                 ),
                 parse_mode="HTML",
                 reply_markup=home_keyboard(),
+            )
+
+            await start_carousel(
+                context,
+                chat_id,
+                query.message.message_id,
+                movie,
             )
 
         except Exception:
@@ -1468,6 +1844,10 @@ async def show_categories(
     query = update.callback_query
 
     await query.answer()
+
+    await stop_carousel(
+        query.message.chat_id
+    )
 
     text = (
         "🎭 <b>MOVIE CATEGORIES</b>\n\n"
@@ -1499,6 +1879,10 @@ async def show_genre(
     query = update.callback_query
 
     await query.answer()
+
+    await stop_carousel(
+        query.message.chat_id
+    )
 
     genre = query.data.replace(
         "genre_",
@@ -1650,6 +2034,10 @@ async def show_help(
 
     await query.answer()
 
+    await stop_carousel(
+        query.message.chat_id
+    )
+
     text = (
         "ℹ️ <b>Movie Myanmar Help</b>\n\n"
         "🔎 <b>Search Movie</b>\n"
@@ -1710,6 +2098,10 @@ async def start_ai(
 ):
 
     user = update.effective_user
+
+    await stop_carousel(
+        update.callback_query.message.chat_id
+    )
 
     user_ai_mode[
         user.id
@@ -2506,6 +2898,16 @@ async def callback_handler(
 
         return
 
+    # -----------------------------------------------------
+    # Any other menu page should stop the carousel.
+    # -----------------------------------------------------
+
+    if query.message:
+
+        await stop_carousel(
+            query.message.chat_id
+        )
+
     if data == "search_movie":
 
         await start_search(
@@ -2929,6 +3331,12 @@ async def main():
 
     print(
         "🔐 Webhook secret enabled"
+    )
+
+    print(
+        f"🎞️ Netflix Carousel: "
+        f"Latest {CAROUSEL_LIMIT} posters / "
+        f"{CAROUSEL_INTERVAL}s"
     )
 
     # -----------------------------------------------------

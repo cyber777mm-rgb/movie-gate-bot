@@ -59,7 +59,9 @@ gemini_client = None
 
 if GEMINI_API_KEY:
     try:
-        gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+        gemini_client = genai.Client(
+            api_key=GEMINI_API_KEY
+        )
     except Exception:
         gemini_client = None
 
@@ -96,7 +98,11 @@ def load_movies():
 
     try:
         if os.path.exists(MOVIE_DB_FILE):
-            with open(MOVIE_DB_FILE, "r", encoding="utf-8") as f:
+            with open(
+                MOVIE_DB_FILE,
+                "r",
+                encoding="utf-8",
+            ) as f:
                 data = json.load(f)
 
                 if isinstance(data, list):
@@ -113,7 +119,11 @@ def load_movies():
 
 def save_movies():
     try:
-        with open(MOVIE_DB_FILE, "w", encoding="utf-8") as f:
+        with open(
+            MOVIE_DB_FILE,
+            "w",
+            encoding="utf-8",
+        ) as f:
             json.dump(
                 movie_database,
                 f,
@@ -139,7 +149,11 @@ def load_ai_usage():
 
     try:
         if os.path.exists(AI_USAGE_FILE):
-            with open(AI_USAGE_FILE, "r", encoding="utf-8") as f:
+            with open(
+                AI_USAGE_FILE,
+                "r",
+                encoding="utf-8",
+            ) as f:
                 data = json.load(f)
 
                 if isinstance(data, dict):
@@ -153,7 +167,11 @@ def load_ai_usage():
 
 def save_ai_usage():
     try:
-        with open(AI_USAGE_FILE, "w", encoding="utf-8") as f:
+        with open(
+            AI_USAGE_FILE,
+            "w",
+            encoding="utf-8",
+        ) as f:
             json.dump(
                 ai_usage,
                 f,
@@ -168,13 +186,20 @@ load_ai_usage()
 
 
 def get_ai_usage(user_id):
-    return int(ai_usage.get(str(user_id), 0))
+    return int(
+        ai_usage.get(
+            str(user_id),
+            0,
+        )
+    )
 
 
 def increase_ai_usage(user_id):
     key = str(user_id)
 
-    ai_usage[key] = get_ai_usage(user_id) + 1
+    ai_usage[key] = (
+        get_ai_usage(user_id) + 1
+    )
 
     save_ai_usage()
 
@@ -234,8 +259,17 @@ def normalize_text(text):
 
     text = text.lower().strip()
 
-    text = re.sub(r"[\[\]\(\)\{\}:,._\-|/\\]+", " ", text)
-    text = re.sub(r"\s+", " ", text)
+    text = re.sub(
+        r"[\[\]\(\)\{\}:,._\-|/\\]+",
+        " ",
+        text,
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
 
     return text
 
@@ -244,7 +278,10 @@ def extract_year(text):
     if not text:
         return None
 
-    match = re.search(r"\b(19|20)\d{2}\b", text)
+    match = re.search(
+        r"\b(19|20)\d{2}\b",
+        text,
+    )
 
     if match:
         return match.group(0)
@@ -276,7 +313,11 @@ def parse_movie_post(message):
     caption = message.caption or ""
     text = message.text or ""
 
-    content = caption if caption else text
+    content = (
+        caption
+        if caption
+        else text
+    )
 
     if not content:
         return None
@@ -322,7 +363,9 @@ def parse_movie_post(message):
 
     try:
         if message.photo:
-            poster_file_id = message.photo[-1].file_id
+            poster_file_id = (
+                message.photo[-1].file_id
+            )
     except Exception:
         poster_file_id = None
 
@@ -335,7 +378,9 @@ def parse_movie_post(message):
         "genres": genres,
         "description": content,
         "post_link": "",
-        "chat_id": str(message.chat_id),
+        "chat_id": str(
+            message.chat_id
+        ),
         "message_id": message.message_id,
         "poster_file_id": poster_file_id,
     }
@@ -345,17 +390,32 @@ def parse_movie_post(message):
 
 def build_movie_link(movie):
 
-    chat_id = str(movie.get("chat_id", ""))
-    message_id = movie.get("message_id")
+    chat_id = str(
+        movie.get(
+            "chat_id",
+            "",
+        )
+    )
+
+    message_id = movie.get(
+        "message_id"
+    )
 
     if not message_id:
-        return movie.get("post_link", MOVIE_CHANNEL_URL)
+        return movie.get(
+            "post_link",
+            MOVIE_CHANNEL_URL,
+        )
 
     if chat_id.startswith("-100"):
 
         internal_id = chat_id[4:]
 
-        return f"https://t.me/c/{internal_id}/{message_id}"
+        return (
+            f"https://t.me/c/"
+            f"{internal_id}/"
+            f"{message_id}"
+        )
 
     return movie.get(
         "post_link",
@@ -377,15 +437,24 @@ def movie_search(query):
     for movie in movie_database:
 
         title = normalize_text(
-            movie.get("title", "")
+            movie.get(
+                "title",
+                "",
+            )
         )
 
         original_name = normalize_text(
-            movie.get("original_name", "")
+            movie.get(
+                "original_name",
+                "",
+            )
         )
 
         description = normalize_text(
-            movie.get("description", "")
+            movie.get(
+                "description",
+                "",
+            )
         )
 
         score = 0
@@ -415,12 +484,18 @@ def movie_search(query):
             score = ratio
 
         if query in description:
-            score = max(score, 0.72)
+            score = max(
+                score,
+                0.72,
+            )
 
         if year:
 
             movie_year = str(
-                movie.get("year", "")
+                movie.get(
+                    "year",
+                    "",
+                )
             )
 
             if movie_year == year:
@@ -448,14 +523,18 @@ def movie_search(query):
 
 def get_latest_movies(limit=10):
 
-    movies = list(movie_database)
+    movies = list(
+        movie_database
+    )
 
     movies.reverse()
 
     return movies[:limit]
 
 
-def get_next_poster_movie(current_index=0):
+def get_next_poster_movie(
+    current_index=0
+):
 
     movies = [
         m
@@ -615,7 +694,10 @@ def movie_keyboard():
 # MEMBERSHIP
 # =========================================================
 
-async def is_member(bot, user_id):
+async def is_member(
+    bot,
+    user_id
+):
 
     try:
 
@@ -676,8 +758,8 @@ def home_caption(movie=None):
 
         return (
             "🎬 <b>MOVIE MYANMAR</b>\n\n"
-            "☔ <b>Xiao Yu CyB (小雨)</b> ရဲ့ Movie Hub ထဲ "
-            "ရောက်လာပြီ 😝❤️\n\n"
+            "☔ <b>Xiao Yu CyB (小雨)</b> ရဲ့ "
+            "Movie Hub ထဲ ရောက်လာပြီ 😝❤️\n\n"
             f"🔥 <b>Latest Movie</b>\n"
             f"🎞️ {movie_info}\n\n"
             "🎥 Movie ရှာမယ်\n"
@@ -1202,7 +1284,9 @@ async def show_genre(
 
     if genre == "All":
 
-        results = list(movie_database)
+        results = list(
+            movie_database
+        )
 
     else:
 
@@ -1255,7 +1339,9 @@ async def show_genre(
 
         return
 
-    results = list(reversed(results))[:15]
+    results = list(
+        reversed(results)
+    )[:15]
 
     buttons = []
 
@@ -1418,6 +1504,15 @@ async def start_ai(
         "ဘာမဆို ရေးလို့ရတယ်။"
     )
 
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🏠 Home",
+                callback_data="home",
+            )
+        ]
+    ])
+
     if update.callback_query:
 
         query = update.callback_query
@@ -1429,14 +1524,7 @@ async def start_ai(
             await query.message.edit_caption(
                 caption=text,
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "🏠 Home",
-                            callback_data="home",
-                        )
-                    ]
-                ]),
+                reply_markup=keyboard,
             )
 
         except Exception:
@@ -1444,14 +1532,7 @@ async def start_ai(
             await query.message.edit_text(
                 text,
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "🏠 Home",
-                            callback_data="home",
-                        )
-                    ]
-                ]),
+                reply_markup=keyboard,
             )
 
     else:
@@ -1459,6 +1540,7 @@ async def start_ai(
         await update.message.reply_text(
             text,
             parse_mode="HTML",
+            reply_markup=keyboard,
         )
 
 
@@ -1620,10 +1702,15 @@ async def channel_post_handler(
     if not message:
         return
 
-    if str(message.chat.username or "").lower() != MAIN_CHANNEL.replace(
-        "@",
-        "",
-    ).lower():
+    if (
+        str(
+            message.chat.username or ""
+        ).lower()
+        != MAIN_CHANNEL.replace(
+            "@",
+            "",
+        ).lower()
+    ):
 
         return
 
@@ -1635,13 +1722,10 @@ async def channel_post_handler(
         return
 
     movie["post_link"] = (
-        f"https://t.me/{message.chat.username}/"
+        f"https://t.me/"
+        f"{message.chat.username}/"
         f"{message.message_id}"
     )
-
-    # -----------------------------------------------
-    # UPDATE EXISTING MOVIE
-    # -----------------------------------------------
 
     existing_index = None
 
@@ -1650,10 +1734,26 @@ async def channel_post_handler(
     ):
 
         if (
-            str(old_movie.get("chat_id"))
-            == str(movie.get("chat_id"))
-            and str(old_movie.get("message_id"))
-            == str(movie.get("message_id"))
+            str(
+                old_movie.get(
+                    "chat_id"
+                )
+            )
+            == str(
+                movie.get(
+                    "chat_id"
+                )
+            )
+            and str(
+                old_movie.get(
+                    "message_id"
+                )
+            )
+            == str(
+                movie.get(
+                    "message_id"
+                )
+            )
         ):
 
             existing_index = i
@@ -1665,8 +1765,6 @@ async def channel_post_handler(
             existing_index
         ]
 
-        # Keep poster if new edited post
-        # doesn't contain a photo.
         if not movie.get(
             "poster_file_id"
         ):
@@ -1725,10 +1823,6 @@ async def message_handler(
     if not text:
         return
 
-    # -----------------------------------------------------
-    # MEMBERSHIP
-    # -----------------------------------------------------
-
     joined = await is_member(
         context.bot,
         user.id,
@@ -1749,10 +1843,6 @@ async def message_handler(
         text
     )
 
-    # -----------------------------------------------------
-    # HOME
-    # -----------------------------------------------------
-
     if normalized in [
         "home",
         "menu",
@@ -1770,10 +1860,6 @@ async def message_handler(
 
         return
 
-    # -----------------------------------------------------
-    # CHANNEL REQUEST
-    # -----------------------------------------------------
-
     if is_channel_request(
         text
     ):
@@ -1786,10 +1872,6 @@ async def message_handler(
         )
 
         return
-
-    # -----------------------------------------------------
-    # SEARCH MODE
-    # -----------------------------------------------------
 
     if user_search_mode.get(
         user.id,
@@ -1883,10 +1965,6 @@ async def message_handler(
 
         return
 
-    # -----------------------------------------------------
-    # MOVIE DATABASE SEARCH FIRST
-    # -----------------------------------------------------
-
     results = movie_search(
         text
     )
@@ -1945,10 +2023,6 @@ async def message_handler(
 
         return
 
-    # -----------------------------------------------------
-    # MOVIE INTENT
-    # -----------------------------------------------------
-
     if has_movie_intent(
         text
     ):
@@ -1978,10 +2052,6 @@ async def message_handler(
 
         return
 
-    # -----------------------------------------------------
-    # SPECIAL REPLIES
-    # -----------------------------------------------------
-
     handled = await handle_special_reply(
         update,
         context,
@@ -1990,10 +2060,6 @@ async def message_handler(
 
     if handled:
         return
-
-    # -----------------------------------------------------
-    # AI MODE
-    # -----------------------------------------------------
 
     ai_words = [
         "စကားပြော",
@@ -2036,7 +2102,6 @@ async def message_handler(
             text
         )
 
-        # Only count successful AI usage.
         if (
             reply
             and not reply.startswith(
@@ -2066,10 +2131,6 @@ async def message_handler(
         )
 
         return
-
-    # -----------------------------------------------------
-    # DEFAULT
-    # -----------------------------------------------------
 
     await update.message.reply_text(
         "ဟေး 😝❤️\n\n"
@@ -2201,7 +2262,14 @@ class HealthHandler(
 
     def do_GET(self):
 
-        if self.path == "/health":
+        # Render checks "/"
+        # So both "/" and "/health"
+        # must return HTTP 200.
+
+        if self.path in (
+            "/",
+            "/health",
+        ):
 
             self.send_response(
                 200
@@ -2218,13 +2286,13 @@ class HealthHandler(
                 b"Movie Myanmar Bot is alive"
             )
 
-        else:
+            return
 
-            self.send_response(
-                404
-            )
+        self.send_response(
+            404
+        )
 
-            self.end_headers()
+        self.end_headers()
 
     def log_message(
         self,
@@ -2243,6 +2311,10 @@ def start_health_server():
             PORT,
         ),
         HealthHandler,
+    )
+
+    print(
+        f"❤️ Health server listening on port {PORT}"
     )
 
     server.serve_forever()

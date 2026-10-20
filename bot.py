@@ -1,9 +1,4 @@
-from pathlib import Path
-
-# Create the complete bot.py from the user's pasted source, with the carousel redesigned
-# as a smooth animated GIF using Pillow. Core bot behavior is retained.
-
-code = r'''import os
+import os
 import asyncio
 import hashlib
 import json
@@ -2496,15 +2491,3 @@ if __name__ == "__main__":
 
     except Exception:
         traceback.print_exc()
-'''
-
-path = Path("/mnt/data/bot.py")
-path.write_text(code, encoding="utf-8")
-
-# compile check
-compile(code, str(path), "exec")
-
-print(f"Created {path}")
-print(f"Lines: {len(code.splitlines())}")
-print(f"Size: {path.stat().st_size / 1024:.1f} KB")
-print("Python syntax check: OK")

@@ -5,6 +5,7 @@ import json
 import threading
 import re
 import traceback
+from difflib import SequenceMatcher
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from google import genai
@@ -49,13 +50,9 @@ GEMINI_API_KEY = os.getenv(
 
 MAIN_CHANNEL = "@moviemyanmar567"
 
-MOVIE_CHANNEL_URL = (
-    "https://t.me/+7EGkZEWlzfAyNGM1"
-)
+MOVIE_CHANNEL_URL = "https://t.me/+7EGkZEWlzfAyNGM1"
 
-RENDER_URL = (
-    "https://movie-gate-bot.onrender.com"
-)
+RENDER_URL = "https://movie-gate-bot.onrender.com"
 
 WEBHOOK_PATH = "/telegram-webhook"
 
@@ -116,7 +113,6 @@ WEBHOOK_SECRET = (
 gemini_client = None
 
 GEMINI_MODEL = "gemini-3.8-flash"
-
 
 if GEMINI_API_KEY:
 
@@ -184,8 +180,7 @@ def load_movie_database():
             movie_database = []
 
             print(
-                "movies.json not found. "
-                "Starting empty database.",
+                "movies.json not found. Starting empty database.",
                 flush=True,
             )
 
@@ -199,10 +194,7 @@ def load_movie_database():
 
             data = json.load(f)
 
-        if isinstance(
-            data,
-            list,
-        ):
+        if isinstance(data, list):
 
             movie_database = data
 
@@ -233,10 +225,7 @@ def save_movie_database():
 
         with movie_db_lock:
 
-            temp_file = (
-                MOVIE_DB_FILE
-                + ".tmp"
-            )
+            temp_file = MOVIE_DB_FILE + ".tmp"
 
             with open(
                 temp_file,
@@ -282,8 +271,7 @@ def load_ai_usage():
             ai_usage = {}
 
             print(
-                "ai_usage.json not found. "
-                "Starting AI usage database.",
+                "ai_usage.json not found. Starting AI usage database.",
                 flush=True,
             )
 
@@ -297,10 +285,7 @@ def load_ai_usage():
 
             data = json.load(f)
 
-        if isinstance(
-            data,
-            dict,
-        ):
+        if isinstance(data, dict):
 
             ai_usage = data
 
@@ -329,18 +314,13 @@ def save_ai_usage():
 
     try:
 
-        # Copy data while holding the lock.
-        # File writing happens after the lock is released.
         with ai_usage_lock:
 
             data_to_save = dict(
                 ai_usage
             )
 
-        temp_file = (
-            AI_USAGE_FILE
-            + ".tmp"
-        )
+        temp_file = AI_USAGE_FILE + ".tmp"
 
         with open(
             temp_file,
@@ -369,9 +349,7 @@ def save_ai_usage():
         )
 
 
-def get_ai_usage(
-    user_id,
-):
+def get_ai_usage(user_id):
 
     key = str(user_id)
 
@@ -391,9 +369,7 @@ def get_ai_usage(
             return 0
 
 
-def increment_ai_usage(
-    user_id,
-):
+def increment_ai_usage(user_id):
 
     key = str(user_id)
 
@@ -416,14 +392,11 @@ def increment_ai_usage(
 
         ai_usage[key] = new_count
 
-    # IMPORTANT:
-    # Save AFTER releasing ai_usage_lock.
     save_ai_usage()
 
     print(
         f"AI usage: user={user_id} "
-        f"count={new_count}/"
-        f"{FREE_AI_LIMIT}",
+        f"count={new_count}/{FREE_AI_LIMIT}",
         flush=True,
     )
 
@@ -431,12 +404,22 @@ def increment_ai_usage(
 
 
 # ============================================================
-# MOVIE NORMALIZATION
+# TEXT NORMALIZATION
 # ============================================================
 
-def normalize_movie_name(
-    text,
-):
+def normalize_text(text):
+
+    if not text:
+        return ""
+
+    return re.sub(
+        r"\s+",
+        " ",
+        text.strip().lower(),
+    )
+
+
+def normalize_movie_name(text):
 
     if not text:
         return ""
@@ -459,12 +442,154 @@ def normalize_movie_name(
 
 
 # ============================================================
-# MOVIE SEARCH
+# MOVIE TITLE HELPERS
 # ============================================================
 
-def movie_search(
-    query,
-):
+def clean_movie_title(title):
+
+    if not title:
+        return ""
+
+    title = title.replace(
+        "**",
+        "",
+    )
+
+    title = re.sub(
+        r"^[\W_🎬🔥⭐️⚡️]+",
+        "",
+        title,
+        flags=re.UNICODE,
+    )
+
+    title = re.sub(
+        r"\s+",
+        " ",
+        title,
+    )
+
+    return title.strip()
+
+
+def extract_title_from_description(text):
+
+    if not text:
+        return ""
+
+    lines = [
+        line.replace("**", "").strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    if not lines:
+        return ""
+
+    # --------------------------------------------------------
+    # BEST CASE:
+    # Movie metadata line such as:
+    #
+    # Out of the Past (2026) 1080p WEB-DL AAC2.0
+    # By Any Means (2026) 1080p WEB-DL
+    # --------------------------------------------------------
+
+    for line in reversed(lines):
+
+        if re.search(
+            r"\((?:19|20)\d{2}\)",
+            line,
+        ):
+
+            candidate = re.sub(
+                r"\b(?:2160p|4k|1080p|720p|480p)\b.*$",
+                "",
+                line,
+                flags=re.IGNORECASE,
+            ).strip()
+
+            candidate = clean_movie_title(
+                candidate
+            )
+
+            if candidate:
+                return candidate
+
+    # --------------------------------------------------------
+    # SECOND CASE:
+    # Year without parentheses
+    # --------------------------------------------------------
+
+    for line in reversed(lines):
+
+        if re.search(
+            r"\b(?:19|20)\d{2}\b",
+            line,
+        ):
+
+            candidate = re.sub(
+                r"\b(?:2160p|4k|1080p|720p|480p)\b.*$",
+                "",
+                line,
+                flags=re.IGNORECASE,
+            ).strip()
+
+            candidate = clean_movie_title(
+                candidate
+            )
+
+            if candidate:
+                return candidate
+
+    return ""
+
+
+def strip_year_from_title(text):
+
+    if not text:
+        return ""
+
+    text = re.sub(
+        r"\((?:19|20)\d{2}\)",
+        " ",
+        text,
+    )
+
+    text = re.sub(
+        r"\b(?:19|20)\d{2}\b",
+        " ",
+        text,
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
+
+    return text.strip()
+
+
+# ============================================================
+# MOVIE SIMILARITY / FUZZY SEARCH
+# ============================================================
+
+def movie_similarity(a, b):
+
+    a = normalize_movie_name(a)
+
+    b = normalize_movie_name(b)
+
+    if not a or not b:
+        return 0.0
+
+    return SequenceMatcher(
+        None,
+        a,
+        b,
+    ).ratio()
+
+
+def movie_search(query):
 
     q = normalize_movie_name(
         query
@@ -473,61 +598,187 @@ def movie_search(
     if not q:
         return []
 
-    results = []
+    q_without_year = normalize_movie_name(
+        strip_year_from_title(query)
+    )
 
-    query_words = q.split()
+    scored_results = []
 
     for movie in movie_database:
 
-        title = normalize_movie_name(
-            movie.get(
-                "title",
-                "",
+        stored_title = movie.get(
+            "title",
+            "",
+        )
+
+        original_name = movie.get(
+            "original_name",
+            "",
+        )
+
+        description = movie.get(
+            "description",
+            "",
+        )
+
+        detected_title = (
+            extract_title_from_description(
+                description
             )
         )
 
-        original_name = normalize_movie_name(
-            movie.get(
-                "original_name",
-                "",
+        candidates = [
+            stored_title,
+            original_name,
+            detected_title,
+        ]
+
+        best_score = 0.0
+
+        direct_match = False
+
+        for candidate in candidates:
+
+            candidate_normalized = (
+                normalize_movie_name(
+                    candidate
+                )
+            )
+
+            candidate_without_year = (
+                normalize_movie_name(
+                    strip_year_from_title(
+                        candidate
+                    )
+                )
+            )
+
+            if not candidate_normalized:
+                continue
+
+            # Exact match
+            if q == candidate_normalized:
+
+                direct_match = True
+
+                best_score = 1.0
+
+                break
+
+            # Search without year
+            if (
+                q_without_year
+                and candidate_without_year
+                and q_without_year
+                == candidate_without_year
+            ):
+
+                direct_match = True
+
+                best_score = 1.0
+
+                break
+
+            # Substring match
+            if (
+                len(q) >= 4
+                and (
+                    q in candidate_normalized
+                    or candidate_normalized in q
+                )
+            ):
+
+                direct_match = True
+
+                best_score = max(
+                    best_score,
+                    0.98,
+                )
+
+            score = movie_similarity(
+                q,
+                candidate_normalized,
+            )
+
+            if score > best_score:
+
+                best_score = score
+
+            if (
+                q_without_year
+                and candidate_without_year
+            ):
+
+                score_without_year = (
+                    movie_similarity(
+                        q_without_year,
+                        candidate_without_year,
+                    )
+                )
+
+                if (
+                    score_without_year
+                    > best_score
+                ):
+
+                    best_score = (
+                        score_without_year
+                    )
+
+        # Old DB entry recovery:
+        # If the title was previously parsed incorrectly,
+        # try to find the query inside the original post.
+        description_normalized = (
+            normalize_movie_name(
+                description
             )
         )
 
-        combined = (
-            f"{title} "
-            f"{original_name}"
-        ).strip()
-
-        if not combined:
-            continue
-
-        # Exact substring match
-        if q in combined:
-
-            results.append(
-                movie
-            )
-
-            continue
-
-        # Word match
-        matched = sum(
-            1
-            for word in query_words
-            if word
-            and word in combined
-        )
-
-        if matched >= max(
-            1,
-            len(query_words) // 2,
+        if (
+            len(q) >= 5
+            and q in description_normalized
         ):
 
-            results.append(
+            direct_match = True
+
+            best_score = max(
+                best_score,
+                0.95,
+            )
+
+        # Typo tolerance
+        if (
+            direct_match
+            or best_score >= 0.68
+        ):
+
+            movie_copy = dict(
                 movie
             )
 
-    return results
+            if detected_title:
+
+                movie_copy[
+                    "title"
+                ] = detected_title
+
+            scored_results.append(
+                (
+                    best_score,
+                    movie_copy,
+                )
+            )
+
+    scored_results.sort(
+        key=lambda item: item[0],
+        reverse=True,
+    )
+
+    return [
+        movie
+        for score, movie
+        in scored_results
+    ]
 
 
 # ============================================================
@@ -545,9 +796,9 @@ def build_movie_link(
             chat_id
         )
 
-        if str(
-            chat_id
-        ).startswith("-100"):
+        if str(chat_id).startswith(
+            "-100"
+        ):
 
             internal_id = str(
                 chat_id
@@ -611,44 +862,16 @@ GENRE_KEYWORDS = {
 
 
 # ============================================================
-# MOVIE TITLE CLEANER
-# ============================================================
-
-def clean_movie_title(
-    title,
-):
-
-    if not title:
-        return ""
-
-    title = re.sub(
-        r"^[\W_🎬🔥⭐️]+",
-        "",
-        title,
-        flags=re.UNICODE,
-    )
-
-    title = re.sub(
-        r"\s+",
-        " ",
-        title,
-    )
-
-    return title.strip()
-
-
-# ============================================================
 # PARSE MOVIE POST
 # ============================================================
 
-def parse_movie_post(
-    update,
-):
+def parse_movie_post(update):
 
     try:
 
         message = (
             update.channel_post
+            or update.edited_channel_post
         )
 
         if not message:
@@ -672,28 +895,81 @@ def parse_movie_post(
         if not lines:
             return None
 
-        first_line = lines[0]
+        # ----------------------------------------------------
+        # FIND REAL MOVIE TITLE
+        #
+        # Do NOT automatically assume first line is title.
+        # Movie Myanmar captions can put description first
+        # and metadata/title near the end.
+        # ----------------------------------------------------
 
-        first_line = first_line.replace(
-            "**",
-            "",
-        )
+        title_line = ""
 
-        title = clean_movie_title(
-            first_line
-        )
+        for line in reversed(lines):
 
-        title = re.sub(
-            r"^[🎬🔥⭐️⚡️]+\s*",
-            "",
-            title,
-        ).strip()
+            clean_line = (
+                line.replace(
+                    "**",
+                    "",
+                ).strip()
+            )
+
+            if re.search(
+                r"\((?:19|20)\d{2}\)",
+                clean_line,
+            ):
+
+                title_line = clean_line
+
+                break
+
+        if not title_line:
+
+            for line in reversed(lines):
+
+                clean_line = (
+                    line.replace(
+                        "**",
+                        "",
+                    ).strip()
+                )
+
+                if (
+                    re.search(
+                        r"\b(?:19|20)\d{2}\b",
+                        clean_line,
+                    )
+                    and re.search(
+                        r"\b(?:2160p|4k|1080p|720p|480p)\b",
+                        clean_line,
+                        re.IGNORECASE,
+                    )
+                ):
+
+                    title_line = clean_line
+
+                    break
+
+        if not title_line:
+
+            title_line = (
+                lines[0]
+                .replace(
+                    "**",
+                    "",
+                )
+                .strip()
+            )
+
+        # ----------------------------------------------------
+        # YEAR
+        # ----------------------------------------------------
 
         year = ""
 
         year_match = re.search(
             r"\((19|20)\d{2}\)",
-            first_line,
+            title_line,
         )
 
         if year_match:
@@ -708,15 +984,33 @@ def parse_movie_post(
 
             year_match = re.search(
                 r"\b(19|20)\d{2}\b",
-                first_line,
+                title_line,
             )
 
             if year_match:
 
                 year = (
-                    year_match
-                    .group(0)
+                    year_match.group(0)
                 )
+
+        # ----------------------------------------------------
+        # TITLE
+        # ----------------------------------------------------
+
+        title = re.sub(
+            r"\b(?:2160p|4k|1080p|720p|480p)\b.*$",
+            "",
+            title_line,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        title = clean_movie_title(
+            title
+        )
+
+        # ----------------------------------------------------
+        # QUALITY
+        # ----------------------------------------------------
 
         quality = ""
 
@@ -729,9 +1023,12 @@ def parse_movie_post(
         if quality_match:
 
             quality = (
-                quality_match
-                .group(1)
+                quality_match.group(1)
             )
+
+        # ----------------------------------------------------
+        # AUDIO
+        # ----------------------------------------------------
 
         audio = ""
 
@@ -771,6 +1068,10 @@ def parse_movie_post(
 
                 break
 
+        # ----------------------------------------------------
+        # ORIGINAL NAME
+        # ----------------------------------------------------
+
         original_name = ""
 
         original_match = re.search(
@@ -787,6 +1088,10 @@ def parse_movie_post(
                 .group(1)
                 .strip()
             )
+
+        # ----------------------------------------------------
+        # GENRES
+        # ----------------------------------------------------
 
         genres = []
 
@@ -808,6 +1113,10 @@ def parse_movie_post(
                     )
 
                     break
+
+        # ----------------------------------------------------
+        # LINK
+        # ----------------------------------------------------
 
         movie_link = build_movie_link(
             message.chat_id,
@@ -857,9 +1166,7 @@ def parse_movie_post(
 # SAVE MOVIE
 # ============================================================
 
-def save_movie(
-    movie,
-):
+def save_movie(movie):
 
     global movie_database
 
@@ -919,7 +1226,14 @@ def save_movie(
             )
 
             if same_message:
-                return
+
+                existing.update(
+                    movie
+                )
+
+                should_save = True
+
+                break
 
             same_movie = (
                 normalize_movie_name(
@@ -1023,7 +1337,6 @@ def join_keyboard():
 
     return InlineKeyboardMarkup(
         [
-
             [
                 InlineKeyboardButton(
                     "📢 Join Channel",
@@ -1040,7 +1353,6 @@ def join_keyboard():
                     callback_data="check_join",
                 )
             ],
-
         ]
     )
 
@@ -1049,7 +1361,6 @@ def category_keyboard():
 
     return InlineKeyboardMarkup(
         [
-
             [
                 InlineKeyboardButton(
                     "🎬 All Movies",
@@ -1099,7 +1410,6 @@ def category_keyboard():
                     callback_data="category_Fantasy",
                 )
             ],
-
         ]
     )
 
@@ -1160,7 +1470,6 @@ async def show_main_menu(
 
     keyboard = InlineKeyboardMarkup(
         [
-
             [
                 InlineKeyboardButton(
                     "🔎 Search Movie",
@@ -1186,7 +1495,6 @@ async def show_main_menu(
                     url=MOVIE_CHANNEL_URL,
                 )
             ],
-
         ]
     )
 
@@ -1211,31 +1519,22 @@ async def show_main_menu(
 # HEALTH / WEBHOOK SERVER
 # ============================================================
 
-class HealthHandler(
-    BaseHTTPRequestHandler
-):
+class HealthHandler(BaseHTTPRequestHandler):
 
-    def do_GET(
-        self
-    ):
+    def do_GET(self):
 
         if self.path in (
             "/",
             "/health",
         ):
 
-            body = (
-                b"Movie Myanmar Bot is alive."
-            )
+            body = b"Movie Myanmar Bot is alive."
 
-            self.send_response(
-                200
-            )
+            self.send_response(200)
 
             self.send_header(
                 "Content-Type",
-                "text/plain; "
-                "charset=utf-8",
+                "text/plain; charset=utf-8",
             )
 
             self.send_header(
@@ -1251,21 +1550,15 @@ class HealthHandler(
 
             return
 
-        self.send_response(
-            404
-        )
+        self.send_response(404)
 
         self.end_headers()
 
-    def do_POST(
-        self
-    ):
+    def do_POST(self):
 
         if self.path != WEBHOOK_PATH:
 
-            self.send_response(
-                404
-            )
+            self.send_response(404)
 
             self.end_headers()
 
@@ -1282,9 +1575,7 @@ class HealthHandler(
 
             if secret != WEBHOOK_SECRET:
 
-                self.send_response(
-                    403
-                )
+                self.send_response(403)
 
                 self.end_headers()
 
@@ -1321,9 +1612,7 @@ class HealthHandler(
 
             response = b"OK"
 
-            self.send_response(
-                200
-            )
+            self.send_response(200)
 
             self.send_header(
                 "Content-Type",
@@ -1351,9 +1640,7 @@ class HealthHandler(
 
             traceback.print_exc()
 
-            self.send_response(
-                500
-            )
+            self.send_response(500)
 
             self.end_headers()
 
@@ -1395,17 +1682,11 @@ def start_http_server():
 # BOT IDENTITY
 # ============================================================
 
-BOT_NAME = (
-    "Xiao Yu CyB (小雨)"
-)
+BOT_NAME = "Xiao Yu CyB (小雨)"
 
-CREATOR_NAME = (
-    "CyB Lin Myat"
-)
+CREATOR_NAME = "CyB Lin Myat"
 
-CREATOR_USERNAME = (
-    "@cyblinmyat777"
-)
+CREATOR_USERNAME = "@cyblinmyat777"
 
 
 # ============================================================
@@ -1447,13 +1728,15 @@ Personality:
 - Keep replies reasonably short
 
 Important:
-Movie searching is handled by the Movie Myanmar movie database.
+Movie searching is handled locally by the Movie Myanmar movie database.
 
-Do not pretend you searched a movie if the database did not return it.
+You are mainly for normal conversation, jokes, casual questions,
+and non-movie conversation.
 
-If the user asks about a movie:
-- Encourage them to search Movie Myanmar.
-- Ask them to send the movie name if needed.
+If the user asks for a movie that Movie Myanmar can handle,
+the local movie system should handle it before you are called.
+
+Never pretend you searched Movie Myanmar.
 
 Never use dangerous or self-harm language.
 Never tell users to die or hurt themselves.
@@ -1469,20 +1752,6 @@ user_histories = {}
 MAX_HISTORY = 12
 
 
-def normalize_text(
-    text,
-):
-
-    if not text:
-        return ""
-
-    return re.sub(
-        r"\s+",
-        " ",
-        text.strip().lower(),
-    )
-
-
 def add_history(
     user_id,
     role,
@@ -1491,19 +1760,25 @@ def add_history(
 
     if user_id not in user_histories:
 
-        user_histories[user_id] = []
+        user_histories[
+            user_id
+        ] = []
 
-    user_histories[user_id].append(
+    user_histories[
+        user_id
+    ].append(
         {
             "role": role,
             "text": text,
         }
     )
 
-    user_histories[user_id] = (
-        user_histories[user_id][
-            -MAX_HISTORY:
-        ]
+    user_histories[
+        user_id
+    ] = (
+        user_histories[
+            user_id
+        ][-MAX_HISTORY:]
     )
 
 
@@ -1570,9 +1845,7 @@ async def send_movie_request(
 
     try:
 
-        user = (
-            message.from_user
-        )
+        user = message.from_user
 
         username = (
             f"@{user.username}"
@@ -1665,6 +1938,10 @@ async def reply_movie_search(
             "last_movie_query"
         ] = query
 
+        context.user_data[
+            "last_movie_results"
+        ] = results[:15]
+
     await message.reply_text(
         f"🔎 <b>{query}</b>\n\n"
         f"🎬 Movie Myanmar ထဲမှာ "
@@ -1695,9 +1972,13 @@ async def reply_movie_search(
 
         if year:
 
-            label += (
-                f" ({year})"
-            )
+            # Avoid showing duplicate year if title already
+            # contains the year.
+            if str(year) not in title:
+
+                label += (
+                    f" ({year})"
+                )
 
         link = movie.get(
             "post_link",
@@ -1728,6 +2009,88 @@ async def reply_movie_search(
 
 
 # ============================================================
+# SEND LAST MOVIE LINK
+# ============================================================
+
+async def send_last_movie_link(
+    message,
+    context,
+):
+
+    results = context.user_data.get(
+        "last_movie_results",
+        [],
+    )
+
+    if not results:
+
+        last_query = context.user_data.get(
+            "last_movie_query",
+            "",
+        )
+
+        if last_query:
+
+            results = movie_search(
+                last_query
+            )
+
+    if not results:
+
+        return False
+
+    movie = results[0]
+
+    title = movie.get(
+        "title",
+        "Movie",
+    )
+
+    year = movie.get(
+        "year",
+        "",
+    )
+
+    label = title
+
+    if (
+        year
+        and str(year) not in title
+    ):
+
+        label += (
+            f" ({year})"
+        )
+
+    link = movie.get(
+        "post_link",
+        MOVIE_CHANNEL_URL,
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"🎬 {label}"[:64],
+                    url=link,
+                )
+            ]
+        ]
+    )
+
+    await message.reply_text(
+        "ရတာပေါ့ 😝❤️\n\n"
+        f"🎬 <b>{label}</b>\n"
+        "ကားကြည့်ဖို့ အောက်ကခလုတ်ကို "
+        "နှိပ်လိုက် 👇",
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+    return True
+
+
+# ============================================================
 # CATEGORY
 # ============================================================
 
@@ -1745,18 +2108,13 @@ async def reply_category(
     else:
 
         results = [
-
             movie
-
-            for movie
-            in movie_database
-
+            for movie in movie_database
             if category
             in movie.get(
                 "genres",
                 [],
             )
-
         ][:30]
 
     if not results:
@@ -1777,6 +2135,21 @@ async def reply_category(
             "Unknown",
         )
 
+        description = movie.get(
+            "description",
+            "",
+        )
+
+        detected_title = (
+            extract_title_from_description(
+                description
+            )
+        )
+
+        if detected_title:
+
+            title = detected_title
+
         year = movie.get(
             "year",
             "",
@@ -1786,7 +2159,10 @@ async def reply_category(
             f"🎬 {title}"
         )
 
-        if year:
+        if (
+            year
+            and str(year) not in title
+        ):
 
             label += (
                 f" ({year})"
@@ -1890,7 +2266,8 @@ async def gemini_reply(
     if not gemini_client:
 
         return (
-            "ဟွန့် 😒 Gemini မရသေးဘူးဟာ။\n"
+            "ဟွန့် 😒 AI က ခဏလေး "
+            "အနားယူနေတယ်ဟာ။\n"
             "နင်ကြည့်ချင်တဲ့ကားနာမည်ပဲ "
             "ပြော၊ ငါ Movie Myanmar ထဲမှာ "
             "ရှာပေးမယ် 🎬😝",
@@ -1923,8 +2300,7 @@ async def gemini_reply(
         + "\n".join(
             conversation
         )
-        + "\n\nReply naturally "
-          "in Burmese."
+        + "\n\nReply naturally in Burmese."
     )
 
     try:
@@ -1971,17 +2347,20 @@ async def gemini_reply(
         )
 
         return (
-            "ဟွန့် 😒 AI က ခဏလေး "
-            "အနားယူနေတယ်။\n"
-            "နင်ကြည့်ချင်တဲ့ကားနာမည်ပဲ "
-            "ပြော၊ ငါ Movie Myanmar ထဲမှာ "
-            "ရှာပေးမယ် 🎬😝",
+            "ဟွန့် 😒 အခုတော့ "
+            "ငါနဲ့စကားအများကြီး "
+            "မပြောနဲ့တော့ဟာ 😂\n\n"
+            "နင်လည်း ဇာတ်ကားသွားကြည့်တော့ 🎬\n"
+            "ဘာကားကြည့်မှာလဲ? "
+            "နာမည်သာပြော 😏\n"
+            "ငါ Movie Myanmar ထဲမှာ "
+            "ရှာပေးမယ် ❤️",
             False,
         )
 
 
 # ============================================================
-# FALLBACK
+# AI QUOTA FALLBACK
 # ============================================================
 
 async def movie_fallback(
@@ -1989,11 +2368,13 @@ async def movie_fallback(
 ):
 
     await message.reply_text(
-        "ဟွန့် 😒 အခုတော့ ငါနဲ့ "
-        "စကားအများကြီး မပြောနဲ့တော့ဟာ 😂\n\n"
-        "နင်ကြည့်ချင်တဲ့ကားနာမည်ပဲ ပြော၊ "
+        "ဟွန့် 😒 နင်နဲ့စကားပြောရတာ "
+        "ပျင်းလာပြီဟာ 😂\n\n"
+        "နင်လည်း ဇာတ်ကားသွားကြည့်တော့ 🎬\n"
+        "ဘာကားကြည့်မှာလဲ? "
+        "နာမည်သာပြော 😏\n\n"
         "ငါ Movie Myanmar ထဲမှာ "
-        "ရှာပေးမယ် 🎬😝"
+        "ရှာပေးမယ် ❤️"
     )
 
 
@@ -2063,9 +2444,7 @@ AI_WORDS = [
 ]
 
 
-def is_ai_request(
-    text,
-):
+def is_ai_request(text):
 
     normalized = normalize_text(
         text
@@ -2089,6 +2468,140 @@ def is_ai_request(
 
 
 # ============================================================
+# MOVIE INTENT DETECTION
+# ============================================================
+
+MOVIE_INTENT_WORDS = [
+
+    "movie",
+    "film",
+    "ကား",
+    "ဇာတ်ကား",
+    "ရုပ်ရှင်",
+
+    "ရှာပေး",
+    "ရှာပေးပါ",
+    "ရှာမယ်",
+
+    "ကြည့်ချင်",
+    "ကြည့်မယ်",
+    "ကြည့်ရမလား",
+
+    "ရှိလား",
+    "ရှိမလား",
+
+    "ကားပေး",
+    "ကားလိုချင်",
+
+    "movie link",
+    "movieလင့်",
+    "movie လင့်",
+
+]
+
+
+def has_movie_intent(text):
+
+    normalized = normalize_text(
+        text
+    )
+
+    if any(
+        word in normalized
+        for word in MOVIE_INTENT_WORDS
+    ):
+
+        return True
+
+    if re.search(
+        r"\b(?:19|20)\d{2}\b",
+        text,
+    ):
+
+        return True
+
+    return False
+
+
+# ============================================================
+# CHANNEL LINK DETECTION
+# ============================================================
+
+CHANNEL_LINK_WORDS = [
+
+    "movie myanmar channel",
+    "movie myanmar link",
+
+    "movie channel",
+    "movie channel link",
+
+    "telegram channel",
+    "telegram channel link",
+    "telegram link",
+
+    "channel link",
+    "channel လင့်",
+    "channel လင့်",
+
+    "ချန်နယ် link",
+    "ချန်နယ်လင့်",
+    "ချန်နယ် လင့်",
+
+    "movie myanmar ချန်နယ်",
+    "movie myanmar channel link",
+
+]
+
+
+def is_channel_link_request(text):
+
+    normalized = normalize_text(
+        text
+    )
+
+    return any(
+        word in normalized
+        for word in CHANNEL_LINK_WORDS
+    )
+
+
+# ============================================================
+# LAST MOVIE LINK DETECTION
+# ============================================================
+
+LAST_MOVIE_LINK_WORDS = [
+
+    "movie link ပေး",
+    "movie link",
+    "ကား link ပေး",
+    "ကားလင့်ပေး",
+    "ကား လင့်ပေး",
+    "link ပေး",
+    "လင့်ပေး",
+    "လင့်ပေး",
+
+]
+
+
+def is_last_movie_link_request(text):
+
+    normalized = normalize_text(
+        text
+    )
+
+    if is_channel_link_request(
+        text
+    ):
+
+        return False
+
+    return any(
+        word in normalized
+        for word in LAST_MOVIE_LINK_WORDS
+    )
+
+
+# ============================================================
 # FOLLOW-UP MOVIE REQUEST DETECTION
 # ============================================================
 
@@ -2096,24 +2609,15 @@ FOLLOWUP_MOVIE_WORDS = [
 
     "ရှာပေး",
     "ရှာပေးပါ",
-    "ပေး",
     "ရပြီလား",
-    "ရပြီ",
-    "အေး",
-    "အေးပေး",
     "အေး ရှာပေး",
-    "ဟုတ်",
-    "ဟုတ်ကဲ့",
-    "ရမလား",
     "ကြည့်မယ်",
     "ကြည့်ချင်တယ်",
 
 ]
 
 
-def is_movie_followup(
-    text,
-):
+def is_movie_followup(text):
 
     normalized = normalize_text(
         text
@@ -2134,14 +2638,11 @@ async def start_command(
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    user = (
-        update.effective_user
-    )
+    user = update.effective_user
 
     if not user:
         return
 
-    # Reset only current interaction mode.
     context.user_data[
         "mode"
     ] = ""
@@ -2206,9 +2707,7 @@ async def reset_command(
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    user = (
-        update.effective_user
-    )
+    user = update.effective_user
 
     if user:
 
@@ -2223,6 +2722,11 @@ async def reset_command(
 
     context.user_data.pop(
         "last_movie_query",
+        None,
+    )
+
+    context.user_data.pop(
+        "last_movie_results",
         None,
     )
 
@@ -2243,9 +2747,7 @@ async def button_handler(
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    query = (
-        update.callback_query
-    )
+    query = update.callback_query
 
     await query.answer()
 
@@ -2339,13 +2841,8 @@ async def button_handler(
 
         if count >= FREE_AI_LIMIT:
 
-            await query.message.reply_text(
-                "ဟွန့် 😒\n"
-                "နင်နဲ့ AI စကားပြောတာ "
-                "free 20 ချက်ပြည့်သွားပြီဟာ 😂\n\n"
-                "ကားနာမည်ပဲ ပြော၊ "
-                "ငါ Movie Myanmar ထဲမှာ "
-                "ရှာပေးမယ် 🎬😝"
+            await movie_fallback(
+                query.message
             )
 
             return
@@ -2372,6 +2869,10 @@ async def button_handler(
 
     if query.data == "categories":
 
+        context.user_data[
+            "mode"
+        ] = ""
+
         await query.message.reply_text(
             "🎭 <b>Movie Categories</b>\n\n"
             "ကြည့်ချင်တဲ့ Genre ရွေးပါ 👇",
@@ -2388,6 +2889,10 @@ async def button_handler(
     if query.data.startswith(
         "category_"
     ):
+
+        context.user_data[
+            "mode"
+        ] = ""
 
         category = (
             query.data.replace(
@@ -2417,9 +2922,7 @@ async def message_handler(
     if not update.message:
         return
 
-    user = (
-        update.effective_user
-    )
+    user = update.effective_user
 
     if not user:
         return
@@ -2465,9 +2968,34 @@ async def message_handler(
         text
     )
 
-    # --------------------------------------------------------
-    # SEARCH MODE
-    # --------------------------------------------------------
+    # ========================================================
+    # 1. MOVIE MYANMAR CHANNEL LINK
+    #
+    # IMPORTANT:
+    # This is checked BEFORE movie request and BEFORE AI.
+    # ========================================================
+
+    if is_channel_link_request(
+        text
+    ):
+
+        context.user_data[
+            "mode"
+        ] = ""
+
+        await update.message.reply_text(
+            "ရတာပေါ့ 😝❤️\n\n"
+            "🎬 <b>Movie Myanmar Movie Channel</b>\n"
+            "အောက်ကခလုတ်ကို နှိပ်ပြီးဝင်လိုက် 👇",
+            parse_mode="HTML",
+            reply_markup=movie_keyboard(),
+        )
+
+        return
+
+    # ========================================================
+    # 2. SEARCH MODE
+    # ========================================================
 
     if mode == "search":
 
@@ -2483,13 +3011,16 @@ async def message_handler(
 
         return
 
-    # --------------------------------------------------------
-    # MOVIE DATABASE SEARCH FIRST
+    # ========================================================
+    # 3. MOVIE DATABASE SEARCH FIRST
     #
-    # IMPORTANT:
-    # This runs BEFORE AI/quota.
-    # Therefore AI exhaustion cannot break movie search.
-    # --------------------------------------------------------
+    # THIS IS THE IMPORTANT PART.
+    #
+    # Even when user is inside AI mode:
+    # - Movie DB is checked first.
+    # - Gemini is NOT called if movie is found.
+    # - AI quota does NOT decrease.
+    # ========================================================
 
     results = movie_search(
         text
@@ -2509,16 +3040,41 @@ async def message_handler(
 
         return
 
-    # --------------------------------------------------------
-    # FOLLOW-UP TO LAST MOVIE
-    #
-    # Example:
-    # User: By Any Means
-    # Bot: found movie
-    # User: အေး ရှာပေး
-    #
-    # Search the previous movie again.
-    # --------------------------------------------------------
+    # ========================================================
+    # 4. "MOVIE LINK ပေး" AFTER A MOVIE SEARCH
+    # ========================================================
+
+    if is_last_movie_link_request(
+        text
+    ):
+
+        sent = await send_last_movie_link(
+            update.message,
+            context,
+        )
+
+        if sent:
+
+            context.user_data[
+                "mode"
+            ] = ""
+
+            return
+
+        # If there is no previous movie,
+        # don't create a request named "movie link ပေး".
+        await update.message.reply_text(
+            "ဘယ်ကားရဲ့ link လိုချင်တာလဲ 😝🎬\n"
+            "ကားနာမည်လေးပို့၊ "
+            "ငါ Movie Myanmar ထဲမှာ "
+            "ရှာပေးမယ် ❤️"
+        )
+
+        return
+
+    # ========================================================
+    # 5. FOLLOW-UP TO LAST MOVIE
+    # ========================================================
 
     last_movie_query = (
         context.user_data.get(
@@ -2529,7 +3085,9 @@ async def message_handler(
 
     if (
         last_movie_query
-        and is_movie_followup(text)
+        and is_movie_followup(
+            text
+        )
     ):
 
         followup_results = movie_search(
@@ -2550,49 +3108,18 @@ async def message_handler(
 
             return
 
-    # --------------------------------------------------------
-    # MOVIE REQUEST DETECTION
-    # --------------------------------------------------------
+    # ========================================================
+    # 6. EXPLICIT MOVIE INTENT
+    #
+    # If user clearly asks for a movie but DB didn't find it,
+    # send request to admin.
+    #
+    # This still happens BEFORE AI.
+    # ========================================================
 
-    movie_request_words = [
-
-        "ရှိလား",
-        "ရှိမလား",
-        "ရှာပေး",
-        "ရှာပေးပါ",
-        "ကားရှာ",
-        "ဇာတ်ကားရှာ",
-        "movieရှာ",
-        "movie ရှာ",
-        "filmရှာ",
-        "film ရှာ",
-        "ကြည့်ချင်",
-        "ကြည့်မယ်",
-        "ကားလိုချင်",
-        "ကားပေး",
-        "movie",
-        "film",
-
-    ]
-
-    has_movie_word = any(
-        word in normalized
-        for word in movie_request_words
-    )
-
-    has_year = bool(
-        re.search(
-            r"\b(19|20)\d{2}\b",
-            text,
-        )
-    )
-
-    looks_like_movie_title = (
-        has_year
-        or has_movie_word
-    )
-
-    if looks_like_movie_title:
+    if has_movie_intent(
+        text
+    ):
 
         context.user_data[
             "mode"
@@ -2605,6 +3132,18 @@ async def message_handler(
         )
 
         return
+
+    # ========================================================
+    # 7. AI MODE + POSSIBLE MOVIE TITLE
+    #
+    # If the user is already inside AI mode, we do NOT want
+    # every random sentence to become a movie request.
+    #
+    # But movie_search() above has already tried fuzzy matching.
+    # Therefore:
+    # - Known / typo movie -> handled above
+    # - Normal conversation -> goes to AI below
+    # ========================================================
 
     # --------------------------------------------------------
     # SPECIAL REPLIES
@@ -2620,13 +3159,15 @@ async def message_handler(
     if handled:
         return
 
-    # --------------------------------------------------------
-    # CONVERSATION / AI
-    # --------------------------------------------------------
+    # ========================================================
+    # 8. CONVERSATION / AI
+    # ========================================================
 
     ai_request = (
         mode == "ai"
-        or is_ai_request(text)
+        or is_ai_request(
+            text
+        )
     )
 
     if ai_request:
@@ -2635,23 +3176,18 @@ async def message_handler(
             "mode"
         ] = "ai"
 
-        current_count = (
-            get_ai_usage(
-                user.id
-            )
+        current_count = get_ai_usage(
+            user.id
         )
 
         # ----------------------------------------------------
         # FREE 20 EXHAUSTED
         #
-        # ONLY AI conversation stops here.
-        # Movie search above is still available.
+        # Only AI conversation stops.
+        # Movie searching remains available.
         # ----------------------------------------------------
 
-        if (
-            current_count
-            >= FREE_AI_LIMIT
-        ):
+        if current_count >= FREE_AI_LIMIT:
 
             await movie_fallback(
                 update.message
@@ -2671,7 +3207,7 @@ async def message_handler(
         )
 
         # ----------------------------------------------------
-        # ONLY COUNT REAL GEMINI SUCCESS
+        # COUNT ONLY SUCCESSFUL GEMINI REQUEST
         # ----------------------------------------------------
 
         if used_ai:
@@ -2688,9 +3224,6 @@ async def message_handler(
                 - new_count,
             )
 
-            # Don't add quota text to every AI response.
-            # It is only logged server-side.
-
             print(
                 f"AI remaining for "
                 f"user={user.id}: "
@@ -2705,9 +3238,13 @@ async def message_handler(
 
         return
 
-    # --------------------------------------------------------
-    # DEFAULT
-    # --------------------------------------------------------
+    # ========================================================
+    # 9. DEFAULT
+    #
+    # A plain title not currently found in DB can be ambiguous.
+    # We don't automatically send every random sentence to
+    # admin as a movie request.
+    # ========================================================
 
     await update.message.reply_text(
         "😝 ဘာလုပ်ပေးရမလဲ သယ်ချင်း?\n\n"

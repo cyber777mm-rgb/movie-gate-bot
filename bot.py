@@ -5,16 +5,19 @@ import json
 import threading
 import re
 import traceback
+import io
 from difflib import SequenceMatcher
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from google import genai
+from PIL import Image, ImageDraw
 
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputMediaPhoto,
+    InputFile,
 )
 
 from telegram.ext import (
@@ -58,7 +61,7 @@ WEBHOOK_SECRET = hashlib.sha256(
 
 
 # =========================================================
-# WEBHOOK RUNTIME STATE
+# WEBHOOK RUNTIME
 # =========================================================
 
 webhook_application = None
@@ -66,17 +69,32 @@ webhook_loop = None
 
 
 # =========================================================
-# NETFLIX STYLE CAROUSEL
+# MOVIE CAROUSEL
 # =========================================================
 
 CAROUSEL_LIMIT = 5
+
+# How often the visible 3-card group changes
 CAROUSEL_INTERVAL = 4
 
-# One automatic carousel per Telegram chat
-carousel_tasks = {}
+# Number of cards visible at once
+CAROUSEL_VISIBLE = 3
 
-# Message ID currently used by the carousel
+# Each movie card is 16:9
+CARD_WIDTH = 420
+CARD_HEIGHT = 236
+
+# Gap between cards
+CARD_GAP = 12
+
+# Non-black background
+CAROUSEL_BG = (245, 245, 245)
+
+carousel_tasks = {}
 carousel_message_ids = {}
+
+# Cache downloaded Telegram posters
+poster_image_cache = {}
 
 
 # =========================================================
@@ -107,7 +125,7 @@ MOVIE_DB_FILE = "movies.json"
 
 
 # =========================================================
-# WELCOME IMAGE FALLBACK
+# WELCOME IMAGE
 # =========================================================
 
 WELCOME_IMAGE = (
@@ -313,7 +331,7 @@ user_last_results = {}
 
 
 # =========================================================
-# MOVIE HELPERS
+# TEXT HELPERS
 # =========================================================
 
 def normalize_text(text):
@@ -375,6 +393,10 @@ def detect_genres(text):
 
     return genres
 
+
+# =========================================================
+# MOVIE PARSER
+# =========================================================
 
 def parse_movie_post(message):
 
@@ -505,6 +527,10 @@ def build_movie_link(movie):
     )
 
 
+# =========================================================
+# SEARCH
+# =========================================================
+
 def movie_search(query):
 
     query = normalize_text(query)
@@ -623,23 +649,25 @@ def get_latest_movies(limit=10):
 
 
 # =========================================================
-# NETFLIX CAROUSEL MOVIES
+# CAROUSEL MOVIES
 # =========================================================
 
 def get_carousel_movies(
     limit=CAROUSEL_LIMIT
 ):
 
-    # Newest movies first.
-    # Only movies with posters are used.
     movies = [
+
         movie
+
         for movie in reversed(
             movie_database
         )
+
         if movie.get(
             "poster_file_id"
         )
+
     ]
 
     return movies[:limit]
@@ -667,20 +695,266 @@ def movie_identity(movie):
     )
 
 
-def get_next_poster_movie(
-    current_index=0
+# =========================================================
+# POSTER IMAGE HELPERS
+# =========================================================
+
+async def get_poster_image(
+    bot,
+    file_id,
 ):
 
-    movies = get_carousel_movies()
+    if not file_id:
+        return None
+
+    if file_id in poster_image_cache:
+
+        try:
+
+            return poster_image_cache[
+                file_id
+            ].copy()
+
+        except Exception:
+
+            pass
+
+    try:
+
+        telegram_file = await bot.get_file(
+            file_id
+        )
+
+        image_bytes = (
+            await telegram_file.download_as_bytearray()
+        )
+
+        image = Image.open(
+            io.BytesIO(
+                bytes(image_bytes)
+            )
+        ).convert("RGB")
+
+        poster_image_cache[
+            file_id
+        ] = image.copy()
+
+        return image
+
+    except Exception:
+
+        traceback.print_exc()
+
+        return None
+
+
+def crop_to_16_9(
+    image,
+    width,
+    height,
+):
+
+    target_ratio = (
+        width / height
+    )
+
+    image_ratio = (
+        image.width / image.height
+    )
+
+    if image_ratio > target_ratio:
+
+        new_width = int(
+            image.height
+            * target_ratio
+        )
+
+        left = (
+            image.width
+            - new_width
+        ) // 2
+
+        image = image.crop(
+            (
+                left,
+                0,
+                left + new_width,
+                image.height,
+            )
+        )
+
+    else:
+
+        new_height = int(
+            image.width
+            / target_ratio
+        )
+
+        top = (
+            image.height
+            - new_height
+        ) // 2
+
+        image = image.crop(
+            (
+                0,
+                top,
+                image.width,
+                top + new_height,
+            )
+        )
+
+    return image.resize(
+        (
+            width,
+            height,
+        ),
+        Image.Resampling.LANCZOS,
+    )
+
+
+async def create_carousel_image(
+    context,
+    movies,
+    start_index,
+):
 
     if not movies:
-        return None, 0
+        return None
 
-    current_index %= len(movies)
+    count = len(movies)
+
+    visible_movies = []
+
+    for offset in range(
+        CAROUSEL_VISIBLE
+    ):
+
+        movie = movies[
+            (start_index + offset)
+            % count
+        ]
+
+        visible_movies.append(
+            movie
+        )
+
+    total_width = (
+        CARD_WIDTH * CAROUSEL_VISIBLE
+        + CARD_GAP
+        * (CAROUSEL_VISIBLE - 1)
+    )
+
+    canvas = Image.new(
+        "RGB",
+        (
+            total_width,
+            CARD_HEIGHT,
+        ),
+        CAROUSEL_BG,
+    )
+
+    for position, movie in enumerate(
+        visible_movies
+    ):
+
+        poster_id = movie.get(
+            "poster_file_id"
+        )
+
+        poster = await get_poster_image(
+            context.bot,
+            poster_id,
+        )
+
+        if poster is None:
+            continue
+
+        card = crop_to_16_9(
+            poster,
+            CARD_WIDTH,
+            CARD_HEIGHT,
+        )
+
+        x = (
+            position
+            * (
+                CARD_WIDTH
+                + CARD_GAP
+            )
+        )
+
+        canvas.paste(
+            card,
+            (
+                x,
+                0,
+            ),
+        )
+
+    output = io.BytesIO()
+
+    canvas.save(
+        output,
+        format="JPEG",
+        quality=90,
+        optimize=True,
+    )
+
+    output.seek(0)
+
+    return output.getvalue()
+
+
+def carousel_caption(
+    movies,
+    start_index,
+):
+
+    if not movies:
+        return home_caption()
+
+    visible = []
+
+    for offset in range(
+        CAROUSEL_VISIBLE
+    ):
+
+        movie = movies[
+            (start_index + offset)
+            % len(movies)
+        ]
+
+        title = movie.get(
+            "title",
+            "Movie",
+        )
+
+        visible.append(
+            title
+        )
 
     return (
-        movies[current_index],
-        current_index,
+
+        "🎬 <b>MOVIE MYANMAR</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+
+        "☔ <b>Xiao Yu CyB (小雨)</b> ❤️\n\n"
+
+        "🎞️ "
+        + "  •  ".join(
+            visible
+        )
+        + "\n\n"
+
+        "🎥 Movie ရှာမယ်\n"
+        "🎭 Genre ရွေးမယ်\n"
+        "🆕 ကားအသစ်တွေကြည့်မယ်\n"
+        "🤖 Xiao Yu နဲ့ စကားပြောမယ်\n\n"
+
+        "━━━━━━━━━━━━━━━━━━\n"
+        "👇 <b>အောက်က Menu ကနေ ရွေးလိုက်</b>"
+
     )
 
 
@@ -688,7 +962,9 @@ def get_next_poster_movie(
 # CAROUSEL CONTROL
 # =========================================================
 
-async def stop_carousel(chat_id):
+async def stop_carousel(
+    chat_id
+):
 
     task = carousel_tasks.pop(
         chat_id,
@@ -725,7 +1001,7 @@ async def carousel_loop(
     context,
     chat_id,
     message_id,
-    current_movie_key="",
+    current_start=0,
 ):
 
     try:
@@ -741,49 +1017,64 @@ async def carousel_loop(
             if not movies:
                 continue
 
-            # Find currently displayed movie.
-            current_position = -1
+            count = len(movies)
 
-            if current_movie_key:
+            # Keep position valid when a new movie arrives.
+            current_start %= count
 
-                for i, movie in enumerate(
+            # If there are fewer than 3 movies,
+            # repeat them to fill the row.
+            if count < CAROUSEL_VISIBLE:
+
+                display_movies = list(
                     movies
-                ):
+                )
 
-                    if (
-                        movie_identity(movie)
-                        == current_movie_key
-                    ):
+                while len(
+                    display_movies
+                ) < CAROUSEL_VISIBLE:
 
-                        current_position = i
-                        break
+                    display_movies.extend(
+                        movies
+                    )
 
-            # If current movie has dropped out
-            # because a new movie arrived,
-            # immediately continue from newest.
-            if current_position == -1:
+                display_movies = (
+                    display_movies[
+                        :CAROUSEL_VISIBLE
+                    ]
+                )
 
-                next_index = 0
+                image_bytes = (
+                    await create_carousel_image(
+                        context,
+                        display_movies,
+                        0,
+                    )
+                )
+
+                caption = carousel_caption(
+                    display_movies,
+                    0,
+                )
 
             else:
 
-                next_index = (
-                    current_position + 1
-                ) % len(movies)
+                image_bytes = (
+                    await create_carousel_image(
+                        context,
+                        movies,
+                        current_start,
+                    )
+                )
 
-            movie = movies[
-                next_index
-            ]
+                caption = carousel_caption(
+                    movies,
+                    current_start,
+                )
 
-            poster_id = movie.get(
-                "poster_file_id"
-            )
-
-            if not poster_id:
+            if not image_bytes:
                 continue
 
-            # Make sure this task still owns
-            # this message.
             if (
                 carousel_message_ids.get(
                     chat_id
@@ -795,6 +1086,13 @@ async def carousel_loop(
 
             try:
 
+                media_file = InputFile(
+                    io.BytesIO(
+                        image_bytes
+                    ),
+                    filename="movie_carousel.jpg",
+                )
+
                 await context.bot.edit_message_media(
 
                     chat_id=chat_id,
@@ -802,23 +1100,20 @@ async def carousel_loop(
                     message_id=message_id,
 
                     media=InputMediaPhoto(
-
-                        media=poster_id,
-
-                        caption=home_caption(
-                            movie
-                        ),
-
+                        media=media_file,
+                        caption=caption,
                         parse_mode="HTML",
-
                     ),
 
                     reply_markup=home_keyboard(),
 
                 )
 
-                current_movie_key = (
-                    movie_identity(movie)
+                current_start = (
+                    current_start + 1
+                ) % max(
+                    1,
+                    len(movies)
                 )
 
             except Exception as e:
@@ -832,8 +1127,11 @@ async def carousel_loop(
                     in error_text
                 ):
 
-                    current_movie_key = (
-                        movie_identity(movie)
+                    current_start = (
+                        current_start + 1
+                    ) % max(
+                        1,
+                        len(movies)
                     )
 
                     continue
@@ -863,7 +1161,9 @@ async def carousel_loop(
 
     finally:
 
-        current_task = asyncio.current_task()
+        current_task = (
+            asyncio.current_task()
+        )
 
         if (
             carousel_tasks.get(
@@ -887,7 +1187,7 @@ async def start_carousel(
     context,
     chat_id,
     message_id,
-    current_movie=None,
+    start_index=0,
 ):
 
     await stop_carousel(
@@ -897,10 +1197,6 @@ async def start_carousel(
     carousel_message_ids[
         chat_id
     ] = message_id
-
-    current_key = movie_identity(
-        current_movie
-    )
 
     task = asyncio.create_task(
 
@@ -912,7 +1208,7 @@ async def start_carousel(
 
             message_id,
 
-            current_key,
+            start_index,
 
         )
 
@@ -1239,11 +1535,7 @@ async def show_home(
     poster_index=0,
 ):
 
-    movie, index = (
-        get_next_poster_movie(
-            poster_index
-        )
-    )
+    movies = get_carousel_movies()
 
     keyboard = home_keyboard()
 
@@ -1264,46 +1556,91 @@ async def show_home(
             chat_id
         )
 
-        # -------------------------------------------------
-        # Movie poster available
-        # -------------------------------------------------
+        if movies:
 
-        if (
-            movie
-            and movie.get(
-                "poster_file_id"
+            # For the first home screen, start at newest.
+            start_index = (
+                poster_index
+                % len(movies)
             )
-        ):
 
-            # If the current message is already
-            # a photo, edit it directly.
-            if message.photo:
+            image_bytes = (
+                await create_carousel_image(
+                    context,
+                    movies,
+                    start_index,
+                )
+            )
+
+            if image_bytes:
+
+                caption = carousel_caption(
+                    movies,
+                    start_index,
+                )
 
                 try:
 
-                    await message.edit_media(
+                    if message.photo:
 
-                        media=InputMediaPhoto(
+                        media_file = InputFile(
+                            io.BytesIO(
+                                image_bytes
+                            ),
+                            filename="movie_carousel.jpg",
+                        )
 
-                            media=movie[
-                                "poster_file_id"
-                            ],
+                        await message.edit_media(
 
-                            caption=home_caption(
-                                movie
+                            media=InputMediaPhoto(
+                                media=media_file,
+                                caption=caption,
+                                parse_mode="HTML",
                             ),
 
-                            parse_mode="HTML",
+                            reply_markup=keyboard,
 
-                        ),
+                        )
 
-                        reply_markup=keyboard,
+                        message_id = (
+                            message.message_id
+                        )
 
-                    )
+                    else:
+
+                        sent = (
+                            await context.bot.send_photo(
+
+                                chat_id=chat_id,
+
+                                photo=InputFile(
+                                    io.BytesIO(
+                                        image_bytes
+                                    ),
+                                    filename="movie_carousel.jpg",
+                                ),
+
+                                caption=caption,
+
+                                parse_mode="HTML",
+
+                                reply_markup=keyboard,
+
+                            )
+                        )
+
+                        try:
+                            await message.delete()
+                        except Exception:
+                            pass
+
+                        message_id = (
+                            sent.message_id
+                        )
 
                     context.user_data[
                         "poster_index"
-                    ] = index
+                    ] = start_index
 
                     await start_carousel(
 
@@ -1311,97 +1648,20 @@ async def show_home(
 
                         chat_id,
 
-                        message.message_id,
+                        message_id,
 
-                        movie,
+                        start_index,
 
                     )
 
                     return
 
-                except Exception as e:
-
-                    # Same poster is already shown.
-                    if (
-                        "message is not modified"
-                        in str(e).lower()
-                    ):
-
-                        context.user_data[
-                            "poster_index"
-                        ] = index
-
-                        await start_carousel(
-
-                            context,
-
-                            chat_id,
-
-                            message.message_id,
-
-                            movie,
-
-                        )
-
-                        return
-
-            # -------------------------------------------------
-            # Current message is text-only.
-            # Send a fresh poster screen.
-            # -------------------------------------------------
-
-            try:
-
-                sent = await context.bot.send_photo(
-
-                    chat_id=chat_id,
-
-                    photo=movie[
-                        "poster_file_id"
-                    ],
-
-                    caption=home_caption(
-                        movie
-                    ),
-
-                    parse_mode="HTML",
-
-                    reply_markup=keyboard,
-
-                )
-
-                try:
-
-                    await message.delete()
-
                 except Exception:
 
-                    pass
-
-                context.user_data[
-                    "poster_index"
-                ] = index
-
-                await start_carousel(
-
-                    context,
-
-                    chat_id,
-
-                    sent.message_id,
-
-                    movie,
-
-                )
-
-                return
-
-            except Exception:
-
-                traceback.print_exc()
+                    traceback.print_exc()
 
         # -------------------------------------------------
-        # Fallback welcome image
+        # Fallback
         # -------------------------------------------------
 
         try:
@@ -1451,7 +1711,7 @@ async def show_home(
         return
 
     # -----------------------------------------------------
-    # NORMAL /START HOME
+    # NORMAL /START
     # -----------------------------------------------------
 
     chat = update.effective_chat
@@ -1460,52 +1720,66 @@ async def show_home(
         chat.id
     )
 
-    if (
-        movie
-        and movie.get(
-            "poster_file_id"
+    if movies:
+
+        start_index = (
+            poster_index
+            % len(movies)
         )
-    ):
 
-        try:
-
-            sent = await chat.send_photo(
-
-                photo=movie[
-                    "poster_file_id"
-                ],
-
-                caption=home_caption(
-                    movie
-                ),
-
-                parse_mode="HTML",
-
-                reply_markup=keyboard,
-
-            )
-
-            context.user_data[
-                "poster_index"
-            ] = index
-
-            await start_carousel(
-
+        image_bytes = (
+            await create_carousel_image(
                 context,
-
-                chat.id,
-
-                sent.message_id,
-
-                movie,
-
+                movies,
+                start_index,
             )
+        )
 
-            return
+        if image_bytes:
 
-        except Exception:
+            try:
 
-            traceback.print_exc()
+                sent = await chat.send_photo(
+
+                    photo=InputFile(
+                        io.BytesIO(
+                            image_bytes
+                        ),
+                        filename="movie_carousel.jpg",
+                    ),
+
+                    caption=carousel_caption(
+                        movies,
+                        start_index,
+                    ),
+
+                    parse_mode="HTML",
+
+                    reply_markup=keyboard,
+
+                )
+
+                context.user_data[
+                    "poster_index"
+                ] = start_index
+
+                await start_carousel(
+
+                    context,
+
+                    chat.id,
+
+                    sent.message_id,
+
+                    start_index,
+
+                )
+
+                return
+
+            except Exception:
+
+                traceback.print_exc()
 
     # -----------------------------------------------------
     # FALLBACK WELCOME IMAGE
@@ -1722,7 +1996,7 @@ async def start_search(
 
 
 # =========================================================
-# LATEST MOVIES
+# LATEST
 # =========================================================
 
 async def show_latest_movies(
@@ -1873,7 +2147,7 @@ async def show_latest_movies(
 
 
 # =========================================================
-# NEXT POSTER
+# NEXT MOVIE
 # =========================================================
 
 async def next_poster(
@@ -1906,43 +2180,77 @@ async def next_poster(
         return
 
     current = int(
-
         context.user_data.get(
             "poster_index",
             0,
         )
-
     )
 
     current += 1
 
-    if current >= len(movies):
-
-        current = 0
+    current %= len(movies)
 
     context.user_data[
         "poster_index"
     ] = current
 
-    movie = movies[
-        current
-    ]
+    image_bytes = (
+        await create_carousel_image(
+            context,
+            movies,
+            current,
+        )
+    )
 
-    if not query.message.photo:
+    if not image_bytes:
+        return
 
-        try:
+    caption = carousel_caption(
+        movies,
+        current,
+    )
+
+    try:
+
+        if query.message.photo:
+
+            media_file = InputFile(
+                io.BytesIO(
+                    image_bytes
+                ),
+                filename="movie_carousel.jpg",
+            )
+
+            await query.message.edit_media(
+
+                media=InputMediaPhoto(
+                    media=media_file,
+                    caption=caption,
+                    parse_mode="HTML",
+                ),
+
+                reply_markup=home_keyboard(),
+
+            )
+
+            message_id = (
+                query.message.message_id
+            )
+
+        else:
 
             sent = await context.bot.send_photo(
 
                 chat_id=chat_id,
 
-                photo=movie[
-                    "poster_file_id"
-                ],
-
-                caption=home_caption(
-                    movie
+                photo=InputFile(
+                    io.BytesIO(
+                        image_bytes
+                    ),
+                    filename="movie_carousel.jpg",
                 ),
+
+                caption=caption,
 
                 parse_mode="HTML",
 
@@ -1951,89 +2259,27 @@ async def next_poster(
             )
 
             try:
-
                 await query.message.delete()
-
             except Exception:
-
                 pass
 
-            await start_carousel(
+            message_id = sent.message_id
 
-                context,
+        await start_carousel(
 
-                chat_id,
+            context,
 
-                sent.message_id,
+            chat_id,
 
-                movie,
+            message_id,
 
-            )
-
-        except Exception:
-
-            traceback.print_exc()
-
-        return
-
-    try:
-
-        await query.message.edit_media(
-
-            media=InputMediaPhoto(
-
-                media=movie[
-                    "poster_file_id"
-                ],
-
-                caption=home_caption(
-                    movie
-                ),
-
-                parse_mode="HTML",
-
-            ),
-
-            reply_markup=home_keyboard(),
+            current,
 
         )
 
-    except Exception as e:
+    except Exception:
 
-        if (
-            "message is not modified"
-            not in str(e).lower()
-        ):
-
-            try:
-
-                await query.message.edit_caption(
-
-                    caption=home_caption(
-                        movie
-                    ),
-
-                    parse_mode="HTML",
-
-                    reply_markup=home_keyboard(),
-
-                )
-
-            except Exception:
-
-                return
-
-    await start_carousel(
-
-        context,
-
-        chat_id,
-
-        query.message.message_id,
-
-        movie,
-
-    )
+        traceback.print_exc()
 
 
 # =========================================================
@@ -2218,11 +2464,8 @@ async def show_genre(
     buttons.append([
 
         InlineKeyboardButton(
-
             "🎭 Categories",
-
             callback_data="categories",
-
         )
 
     ])
@@ -2230,11 +2473,8 @@ async def show_genre(
     buttons.append([
 
         InlineKeyboardButton(
-
             "🏠 Home",
-
             callback_data="home",
-
         )
 
     ])
@@ -2386,11 +2626,8 @@ async def start_ai(
     )
 
     remaining = max(
-
         0,
-
         FREE_AI_LIMIT - used,
-
     )
 
     text = (
@@ -2529,23 +2766,17 @@ User:
 
 
 # =========================================================
-# CHANNEL LINK
+# CHANNEL REQUEST
 # =========================================================
 
 CHANNEL_REQUEST_WORDS = [
 
     "movie myanmar channel",
-
     "movie channel link",
-
     "channel link",
-
     "telegram channel",
-
     "channel ပေး",
-
     "channel link ပေး",
-
     "channel လင့်",
 
 ]
@@ -2558,11 +2789,8 @@ def is_channel_request(text):
     )
 
     return any(
-
         word in normalized
-
         for word in CHANNEL_REQUEST_WORDS
-
     )
 
 
@@ -2573,33 +2801,19 @@ def is_channel_request(text):
 MOVIE_INTENT_WORDS = [
 
     "movie",
-
     "film",
-
     "ကား",
-
     "ဇာတ်ကား",
-
     "ရုပ်ရှင်",
-
     "ရှာပေး",
-
     "ရှာပေးပါ",
-
     "ရှာမယ်",
-
     "ကြည့်ချင်",
-
     "ကြည့်မယ်",
-
     "ရှိလား",
-
     "ရှိမလား",
-
     "ကားပေး",
-
     "ကားလိုချင်",
-
     "movie link",
 
 ]
@@ -2612,11 +2826,8 @@ def has_movie_intent(text):
     )
 
     return any(
-
         word in normalized
-
         for word in MOVIE_INTENT_WORDS
-
     )
 
 
@@ -2635,13 +2846,11 @@ async def handle_special_reply(
     )
 
     if normalized in [
-
         "ဟေး",
         "ဟယ်လို",
         "hello",
         "hi",
         "hey",
-
     ]:
 
         await update.message.reply_text(
@@ -2688,6 +2897,13 @@ async def channel_post_handler(
     if not message:
         return
 
+    print(
+        "📺 Channel post received:",
+        message.message_id,
+        "Chat:",
+        message.chat.username,
+    )
+
     if (
 
         str(
@@ -2703,6 +2919,11 @@ async def channel_post_handler(
 
     ):
 
+        print(
+            "⚠️ Ignored channel:",
+            message.chat.username,
+        )
+
         return
 
     movie = parse_movie_post(
@@ -2710,6 +2931,12 @@ async def channel_post_handler(
     )
 
     if not movie:
+
+        print(
+            "⚠️ Channel post has no caption/text:",
+            message.message_id,
+        )
+
         return
 
     movie["post_link"] = (
@@ -2792,21 +3019,16 @@ async def channel_post_handler(
     save_movies()
 
     print(
-
         "🎬 Movie saved:",
-
-        movie.get(
-            "title"
-        ),
-
+        movie.get("title"),
         "Poster:",
-
         bool(
             movie.get(
                 "poster_file_id"
             )
         ),
-
+        "Total:",
+        len(movie_database),
     )
 
 
@@ -2854,9 +3076,6 @@ async def message_handler(
 
         return
 
-    # User started typing.
-    # Stop the home carousel so it does not
-    # keep changing behind the conversation.
     await stop_carousel(
         update.effective_chat.id
     )
@@ -2866,12 +3085,10 @@ async def message_handler(
     )
 
     if normalized in [
-
         "home",
         "menu",
         "ပင်မ",
         "မီနူး",
-
     ]:
 
         user_search_mode[
@@ -2937,9 +3154,7 @@ async def message_handler(
                     "",
                 )
 
-                label = (
-                    f"🎬 {title}"
-                )
+                label = f"🎬 {title}"
 
                 if year:
 
@@ -3053,9 +3268,7 @@ async def message_handler(
                 "",
             )
 
-            label = (
-                f"🎬 {title}"
-            )
+            label = f"🎬 {title}"
 
             if year:
 
@@ -3144,18 +3357,15 @@ async def message_handler(
         return
 
     handled = await handle_special_reply(
-
         update,
         context,
         text,
-
     )
 
     if handled:
         return
 
     ai_words = [
-
         "စကားပြော",
         "စကားပြောမယ်",
         "ai",
@@ -3163,15 +3373,11 @@ async def message_handler(
         "小雨",
         "ဘာလုပ်နေလဲ",
         "နေကောင်းလား",
-
     ]
 
     if any(
-
         word in normalized
-
         for word in ai_words
-
     ):
 
         user_ai_mode[
@@ -3204,17 +3410,13 @@ async def message_handler(
         )
 
         if (
-
             reply
-
             and not reply.startswith(
                 "အခု AI က"
             )
-
             and not reply.startswith(
                 "AI service"
             )
-
         ):
 
             increase_ai_usage(
@@ -3222,14 +3424,11 @@ async def message_handler(
             )
 
         remaining = max(
-
             0,
-
             FREE_AI_LIMIT
             - get_ai_usage(
                 user.id
             ),
-
         )
 
         await update.message.reply_text(
@@ -3316,7 +3515,6 @@ async def callback_handler(
 
         return
 
-    # Other screens must stop carousel.
     if query.message:
 
         await stop_carousel(
@@ -3432,11 +3630,8 @@ class HealthHandler(
         ):
 
             self._send_text(
-
                 200,
-
                 "Movie Myanmar Bot is alive",
-
             )
 
             return
@@ -3583,6 +3778,7 @@ class HealthHandler(
                 "Webhook processing error",
             )
 
+
     def log_message(
         self,
         format,
@@ -3606,9 +3802,7 @@ def start_health_server():
     )
 
     print(
-
         f"❤️ Health/Webhook server listening on port {PORT}"
-
     )
 
     server.serve_forever()
@@ -3640,10 +3834,6 @@ async def main():
         .build()
 
     )
-
-    # -----------------------------------------------------
-    # HANDLERS
-    # -----------------------------------------------------
 
     application.add_handler(
 
@@ -3687,27 +3877,15 @@ async def main():
 
     )
 
-    # -----------------------------------------------------
-    # SAVE APP + EVENT LOOP
-    # -----------------------------------------------------
-
     webhook_application = application
 
     webhook_loop = (
         asyncio.get_running_loop()
     )
 
-    # -----------------------------------------------------
-    # INITIALIZE
-    # -----------------------------------------------------
-
     await application.initialize()
 
     await application.start()
-
-    # -----------------------------------------------------
-    # HTTP SERVER
-    # -----------------------------------------------------
 
     threading.Thread(
 
@@ -3716,10 +3894,6 @@ async def main():
         daemon=True,
 
     ).start()
-
-    # -----------------------------------------------------
-    # TELEGRAM WEBHOOK
-    # -----------------------------------------------------
 
     webhook_url = (
         RENDER_URL
@@ -3735,18 +3909,12 @@ async def main():
         allowed_updates=[
 
             "message",
-
             "callback_query",
-
             "channel_post",
 
         ],
 
     )
-
-    # -----------------------------------------------------
-    # LOGS
-    # -----------------------------------------------------
 
     print(
         "🎬 Movie Myanmar Bot started"
@@ -3762,16 +3930,10 @@ async def main():
     )
 
     print(
-
-        f"🎞️ Netflix Carousel: "
-        f"Latest {CAROUSEL_LIMIT} posters / "
+        f"🎞️ 3-Card 16:9 Carousel: "
+        f"Latest {CAROUSEL_LIMIT} movies / "
         f"{CAROUSEL_INTERVAL}s"
-
     )
-
-    # -----------------------------------------------------
-    # KEEP ALIVE
-    # -----------------------------------------------------
 
     await asyncio.Event().wait()
 

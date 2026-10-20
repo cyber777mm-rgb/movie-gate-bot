@@ -66,16 +66,16 @@ webhook_loop = None
 
 
 # =========================================================
-# NETFLIX STYLE CAROUSEL CONFIG
+# NETFLIX STYLE CAROUSEL
 # =========================================================
 
 CAROUSEL_LIMIT = 5
 CAROUSEL_INTERVAL = 4
 
-# One carousel task per Telegram chat.
+# One automatic carousel per Telegram chat
 carousel_tasks = {}
 
-# Current carousel message for each chat.
+# Message ID currently used by the carousel
 carousel_message_ids = {}
 
 
@@ -89,15 +89,11 @@ AI_USAGE_FILE = "ai_usage.json"
 gemini_client = None
 
 if GEMINI_API_KEY:
-
     try:
-
         gemini_client = genai.Client(
             api_key=GEMINI_API_KEY
         )
-
     except Exception:
-
         gemini_client = None
 
 GEMINI_MODEL = "gemini-3.8-flash"
@@ -134,9 +130,7 @@ def load_movies():
 
     try:
 
-        if os.path.exists(
-            MOVIE_DB_FILE
-        ):
+        if os.path.exists(MOVIE_DB_FILE):
 
             with open(
                 MOVIE_DB_FILE,
@@ -146,15 +140,9 @@ def load_movies():
 
                 data = json.load(f)
 
-                if isinstance(
-                    data,
-                    list,
-                ):
-
+                if isinstance(data, list):
                     movie_database = data
-
                 else:
-
                     movie_database = []
 
         else:
@@ -204,9 +192,7 @@ def load_ai_usage():
 
     try:
 
-        if os.path.exists(
-            AI_USAGE_FILE
-        ):
+        if os.path.exists(AI_USAGE_FILE):
 
             with open(
                 AI_USAGE_FILE,
@@ -216,15 +202,9 @@ def load_ai_usage():
 
                 data = json.load(f)
 
-                if isinstance(
-                    data,
-                    dict,
-                ):
-
+                if isinstance(data, dict):
                     ai_usage = data
-
                 else:
-
                     ai_usage = {}
 
     except Exception:
@@ -257,9 +237,7 @@ def save_ai_usage():
 load_ai_usage()
 
 
-def get_ai_usage(
-    user_id
-):
+def get_ai_usage(user_id):
 
     return int(
         ai_usage.get(
@@ -269,16 +247,12 @@ def get_ai_usage(
     )
 
 
-def increase_ai_usage(
-    user_id
-):
+def increase_ai_usage(user_id):
 
     key = str(user_id)
 
     ai_usage[key] = (
-        get_ai_usage(
-            user_id
-        )
+        get_ai_usage(user_id)
         + 1
     )
 
@@ -342,12 +316,9 @@ user_last_results = {}
 # MOVIE HELPERS
 # =========================================================
 
-def normalize_text(
-    text
-):
+def normalize_text(text):
 
     if not text:
-
         return ""
 
     text = text.lower().strip()
@@ -367,12 +338,9 @@ def normalize_text(
     return text
 
 
-def extract_year(
-    text
-):
+def extract_year(text):
 
     if not text:
-
         return None
 
     match = re.search(
@@ -381,51 +349,34 @@ def extract_year(
     )
 
     if match:
-
         return match.group(0)
 
     return None
 
 
-def detect_genres(
-    text
-):
+def detect_genres(text):
 
     if not text:
-
         return []
 
-    normalized = normalize_text(
-        text
-    )
+    normalized = normalize_text(text)
 
     genres = []
 
-    for genre, keywords in (
-        GENRE_KEYWORDS.items()
-    ):
+    for genre, keywords in GENRE_KEYWORDS.items():
 
         for keyword in keywords:
 
-            if (
-                normalize_text(
-                    keyword
-                )
-                in normalized
-            ):
+            if normalize_text(keyword) in normalized:
 
-                genres.append(
-                    genre
-                )
+                genres.append(genre)
 
                 break
 
     return genres
 
 
-def parse_movie_post(
-    message
-):
+def parse_movie_post(message):
 
     caption = message.caption or ""
     text = message.text or ""
@@ -437,7 +388,6 @@ def parse_movie_post(
     )
 
     if not content:
-
         return None
 
     lines = [
@@ -447,14 +397,11 @@ def parse_movie_post(
     ]
 
     if not lines:
-
         return None
 
     title = lines[0]
 
-    year = extract_year(
-        content
-    )
+    year = extract_year(content)
 
     quality = ""
 
@@ -465,10 +412,7 @@ def parse_movie_post(
     )
 
     if quality_match:
-
-        quality = (
-            quality_match.group(1)
-        )
+        quality = quality_match.group(1)
 
     audio = ""
 
@@ -479,24 +423,16 @@ def parse_movie_post(
     )
 
     if audio_match:
+        audio = audio_match.group(1)
 
-        audio = (
-            audio_match.group(1)
-        )
-
-    genres = detect_genres(
-        content
-    )
+    genres = detect_genres(content)
 
     poster_file_id = None
 
     try:
 
         if message.photo:
-
-            poster_file_id = (
-                message.photo[-1].file_id
-            )
+            poster_file_id = message.photo[-1].file_id
 
     except Exception:
 
@@ -524,22 +460,16 @@ def parse_movie_post(
             message.chat_id
         ),
 
-        "message_id": (
-            message.message_id
-        ),
+        "message_id": message.message_id,
 
-        "poster_file_id": (
-            poster_file_id
-        ),
+        "poster_file_id": poster_file_id,
 
     }
 
     return movie
 
 
-def build_movie_link(
-    movie
-):
+def build_movie_link(movie):
 
     chat_id = str(
         movie.get(
@@ -559,9 +489,7 @@ def build_movie_link(
             MOVIE_CHANNEL_URL,
         )
 
-    if chat_id.startswith(
-        "-100"
-    ):
+    if chat_id.startswith("-100"):
 
         internal_id = chat_id[4:]
 
@@ -577,23 +505,16 @@ def build_movie_link(
     )
 
 
-def movie_search(
-    query
-):
+def movie_search(query):
 
-    query = normalize_text(
-        query
-    )
+    query = normalize_text(query)
 
     if not query:
-
         return []
 
     results = []
 
-    year = extract_year(
-        query
-    )
+    year = extract_year(query)
 
     for movie in movie_database:
 
@@ -690,9 +611,7 @@ def movie_search(
     ]
 
 
-def get_latest_movies(
-    limit=10
-):
+def get_latest_movies(limit=10):
 
     movies = list(
         movie_database
@@ -704,13 +623,15 @@ def get_latest_movies(
 
 
 # =========================================================
-# NETFLIX STYLE CAROUSEL MOVIES
+# NETFLIX CAROUSEL MOVIES
 # =========================================================
 
 def get_carousel_movies(
     limit=CAROUSEL_LIMIT
 ):
 
+    # Newest movies first.
+    # Only movies with posters are used.
     movies = [
         movie
         for movie in reversed(
@@ -724,12 +645,9 @@ def get_carousel_movies(
     return movies[:limit]
 
 
-def movie_identity(
-    movie
-):
+def movie_identity(movie):
 
     if not movie:
-
         return ""
 
     return (
@@ -756,12 +674,9 @@ def get_next_poster_movie(
     movies = get_carousel_movies()
 
     if not movies:
-
         return None, 0
 
-    current_index = (
-        current_index % len(movies)
-    )
+    current_index %= len(movies)
 
     return (
         movies[current_index],
@@ -773,9 +688,7 @@ def get_next_poster_movie(
 # CAROUSEL CONTROL
 # =========================================================
 
-async def stop_carousel(
-    chat_id
-):
+async def stop_carousel(chat_id):
 
     task = carousel_tasks.pop(
         chat_id,
@@ -787,25 +700,25 @@ async def stop_carousel(
         None,
     )
 
-    if task:
+    if not task:
+        return
 
-        if task is asyncio.current_task():
+    if task is asyncio.current_task():
+        return
 
-            return
+    task.cancel()
 
-        task.cancel()
+    try:
 
-        try:
+        await task
 
-            await task
+    except asyncio.CancelledError:
 
-        except asyncio.CancelledError:
+        pass
 
-            pass
+    except Exception:
 
-        except Exception:
-
-            pass
+        pass
 
 
 async def carousel_loop(
@@ -826,12 +739,9 @@ async def carousel_loop(
             movies = get_carousel_movies()
 
             if not movies:
-
                 continue
 
-            # Find the movie currently shown.
-            # This makes the carousel handle new uploads
-            # without skipping the wrong movie.
+            # Find currently displayed movie.
             current_position = -1
 
             if current_movie_key:
@@ -841,16 +751,16 @@ async def carousel_loop(
                 ):
 
                     if (
-                        movie_identity(
-                            movie
-                        )
+                        movie_identity(movie)
                         == current_movie_key
                     ):
 
                         current_position = i
-
                         break
 
+            # If current movie has dropped out
+            # because a new movie arrived,
+            # immediately continue from newest.
             if current_position == -1:
 
                 next_index = 0
@@ -865,14 +775,15 @@ async def carousel_loop(
                 next_index
             ]
 
-            if not movie.get(
+            poster_id = movie.get(
                 "poster_file_id"
-            ):
+            )
 
+            if not poster_id:
                 continue
 
-            # Make sure the carousel message
-            # still belongs to this task.
+            # Make sure this task still owns
+            # this message.
             if (
                 carousel_message_ids.get(
                     chat_id
@@ -885,24 +796,29 @@ async def carousel_loop(
             try:
 
                 await context.bot.edit_message_media(
+
                     chat_id=chat_id,
+
                     message_id=message_id,
+
                     media=InputMediaPhoto(
-                        media=movie[
-                            "poster_file_id"
-                        ],
+
+                        media=poster_id,
+
                         caption=home_caption(
                             movie
                         ),
+
                         parse_mode="HTML",
+
                     ),
+
                     reply_markup=home_keyboard(),
+
                 )
 
                 current_movie_key = (
-                    movie_identity(
-                        movie
-                    )
+                    movie_identity(movie)
                 )
 
             except Exception as e:
@@ -911,41 +827,29 @@ async def carousel_loop(
                     e
                 ).lower()
 
-                # Message was deleted or can no longer
-                # be edited. Stop this carousel safely.
-                if (
-                    "message to edit not found"
-                    in error_text
-                    or
-                    "message can't be edited"
-                    in error_text
-                    or
-                    "message identifier is not specified"
-                    in error_text
-                    or
-                    "chat not found"
-                    in error_text
-                    or
-                    "forbidden"
-                    in error_text
-                ):
-
-                    return
-
-                # Telegram sometimes reports "not modified".
-                # The carousel can simply continue.
                 if (
                     "message is not modified"
                     in error_text
                 ):
 
                     current_movie_key = (
-                        movie_identity(
-                            movie
-                        )
+                        movie_identity(movie)
                     )
 
                     continue
+
+                if any(
+                    error in error_text
+                    for error in [
+                        "message to edit not found",
+                        "message can't be edited",
+                        "message identifier is not specified",
+                        "chat not found",
+                        "forbidden",
+                    ]
+                ):
+
+                    return
 
                 traceback.print_exc()
 
@@ -999,12 +903,19 @@ async def start_carousel(
     )
 
     task = asyncio.create_task(
+
         carousel_loop(
+
             context,
+
             chat_id,
+
             message_id,
+
             current_key,
+
         )
+
     )
 
     carousel_tasks[
@@ -1019,132 +930,184 @@ async def start_carousel(
 def join_keyboard():
 
     return InlineKeyboardMarkup([
+
         [
+
             InlineKeyboardButton(
                 "📢 Join Movie Myanmar",
                 url=MOVIE_CHANNEL_URL,
             )
+
         ],
+
         [
+
             InlineKeyboardButton(
                 "✅ I Joined",
                 callback_data="check_join",
             )
+
         ],
+
     ])
 
 
 def home_keyboard():
 
     return InlineKeyboardMarkup([
+
         [
+
             InlineKeyboardButton(
                 "🔎 Search Movie",
                 callback_data="search_movie",
             ),
+
             InlineKeyboardButton(
                 "🎭 Categories",
                 callback_data="categories",
             ),
+
         ],
+
         [
+
             InlineKeyboardButton(
                 "🆕 Latest Movies",
                 callback_data="latest_movies",
             ),
+
             InlineKeyboardButton(
                 "🤖 AI Chat",
                 callback_data="ai_chat",
             ),
+
         ],
+
         [
+
             InlineKeyboardButton(
                 "🎞️ Next Movie",
                 callback_data="next_poster",
             ),
+
             InlineKeyboardButton(
                 "📢 Movie Channel",
                 url=MOVIE_CHANNEL_URL,
             ),
+
         ],
+
         [
+
             InlineKeyboardButton(
                 "ℹ️ Help",
                 callback_data="help",
             )
+
         ],
+
     ])
 
 
 def category_keyboard():
 
     return InlineKeyboardMarkup([
+
         [
+
             InlineKeyboardButton(
                 "🎬 All Movies",
                 callback_data="genre_All",
             )
+
         ],
+
         [
+
             InlineKeyboardButton(
                 "⚔️ Action",
                 callback_data="genre_Action",
             ),
+
             InlineKeyboardButton(
                 "😂 Comedy",
                 callback_data="genre_Comedy",
             ),
+
         ],
+
         [
+
             InlineKeyboardButton(
                 "❤️ Romance",
                 callback_data="genre_Romance",
             ),
+
             InlineKeyboardButton(
                 "👻 Horror",
                 callback_data="genre_Horror",
             ),
+
         ],
+
         [
+
             InlineKeyboardButton(
                 "🔥 Thriller",
                 callback_data="genre_Thriller",
             ),
+
             InlineKeyboardButton(
                 "🎭 Drama",
                 callback_data="genre_Drama",
             ),
+
         ],
+
         [
+
             InlineKeyboardButton(
                 "✨ Fantasy",
                 callback_data="genre_Fantasy",
             )
+
         ],
+
         [
+
             InlineKeyboardButton(
                 "🏠 Home",
                 callback_data="home",
             )
+
         ],
+
     ])
 
 
 def movie_keyboard():
 
     return InlineKeyboardMarkup([
+
         [
+
             InlineKeyboardButton(
                 "📢 Movie Myanmar Channel",
                 url=MOVIE_CHANNEL_URL,
             )
+
         ],
+
         [
+
             InlineKeyboardButton(
                 "🏠 Home",
                 callback_data="home",
             )
+
         ],
+
     ])
 
 
@@ -1160,8 +1123,11 @@ async def is_member(
     try:
 
         member = await bot.get_chat_member(
+
             chat_id=MAIN_CHANNEL,
+
             user_id=user_id,
+
         )
 
         return member.status in (
@@ -1176,7 +1142,7 @@ async def is_member(
 
 
 # =========================================================
-# HOME TEXT
+# HOME CAPTION
 # =========================================================
 
 def home_caption(
@@ -1226,26 +1192,40 @@ def home_caption(
             )
 
         return (
-            "🎬 <b>MOVIE MYANMAR</b>\n\n"
-            "☔ <b>Xiao Yu CyB (小雨)</b> ရဲ့ "
-            "Movie Hub ထဲ ရောက်လာပြီ 😝❤️\n\n"
+
+            "🎬 <b>MOVIE MYANMAR</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+
+            "☔ <b>Xiao Yu CyB (小雨)</b>\n"
+            "🍿 Your Movie Hub ❤️\n\n"
+
             f"🔥 <b>Latest Movie</b>\n"
             f"🎞️ {movie_info}\n\n"
+
             "🎥 Movie ရှာမယ်\n"
             "🎭 Genre ရွေးမယ်\n"
             "🆕 ကားအသစ်တွေကြည့်မယ်\n"
             "🤖 Xiao Yu နဲ့ စကားပြောမယ်\n\n"
+
+            "━━━━━━━━━━━━━━━━━━\n"
             "👇 <b>အောက်က Menu ကနေ ရွေးလိုက်</b>"
+
         )
 
     return (
-        "🎬 <b>MOVIE MYANMAR</b>\n\n"
+
+        "🎬 <b>MOVIE MYANMAR</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+
         "☔ <b>Xiao Yu CyB (小雨)</b> ပါ 😝❤️\n\n"
+
         "🎥 Movie ရှာလို့ရတယ်\n"
         "🎭 Genre နဲ့ရှာလို့ရတယ်\n"
         "🆕 Latest Movies ကြည့်လို့ရတယ်\n"
         "🤖 AI နဲ့လည်း စကားပြောလို့ရတယ်\n\n"
+
         "👇 <b>အောက်က Menu ကိုရွေးပါ</b>"
+
     )
 
 
@@ -1280,96 +1260,189 @@ async def show_home(
         message = query.message
         chat_id = message.chat_id
 
-        # Stop old carousel first.
         await stop_carousel(
             chat_id
         )
 
-        try:
+        # -------------------------------------------------
+        # Movie poster available
+        # -------------------------------------------------
 
-            if (
-                movie
-                and movie.get(
-                    "poster_file_id"
-                )
-            ):
+        if (
+            movie
+            and movie.get(
+                "poster_file_id"
+            )
+        ):
+
+            # If the current message is already
+            # a photo, edit it directly.
+            if message.photo:
 
                 try:
 
                     await message.edit_media(
+
                         media=InputMediaPhoto(
+
                             media=movie[
                                 "poster_file_id"
                             ],
+
                             caption=home_caption(
                                 movie
                             ),
+
                             parse_mode="HTML",
+
                         ),
+
                         reply_markup=keyboard,
+
                     )
 
-                except Exception:
+                    context.user_data[
+                        "poster_index"
+                    ] = index
 
-                    await message.edit_caption(
-                        caption=home_caption(
-                            movie
-                        ),
-                        parse_mode="HTML",
-                        reply_markup=keyboard,
+                    await start_carousel(
+
+                        context,
+
+                        chat_id,
+
+                        message.message_id,
+
+                        movie,
+
                     )
 
-                # Start automatic Netflix-style carousel.
-                await start_carousel(
-                    context,
-                    chat_id,
-                    message.message_id,
-                    movie,
+                    return
+
+                except Exception as e:
+
+                    # Same poster is already shown.
+                    if (
+                        "message is not modified"
+                        in str(e).lower()
+                    ):
+
+                        context.user_data[
+                            "poster_index"
+                        ] = index
+
+                        await start_carousel(
+
+                            context,
+
+                            chat_id,
+
+                            message.message_id,
+
+                            movie,
+
+                        )
+
+                        return
+
+            # -------------------------------------------------
+            # Current message is text-only.
+            # Send a fresh poster screen.
+            # -------------------------------------------------
+
+            try:
+
+                sent = await context.bot.send_photo(
+
+                    chat_id=chat_id,
+
+                    photo=movie[
+                        "poster_file_id"
+                    ],
+
+                    caption=home_caption(
+                        movie
+                    ),
+
+                    parse_mode="HTML",
+
+                    reply_markup=keyboard,
+
                 )
-
-            else:
 
                 try:
 
-                    await message.edit_caption(
-                        caption=home_caption(),
-                        parse_mode="HTML",
-                        reply_markup=keyboard,
-                    )
+                    await message.delete()
 
                 except Exception:
 
-                    await message.edit_text(
-                        home_caption(),
-                        parse_mode="HTML",
-                        reply_markup=keyboard,
-                    )
+                    pass
+
+                context.user_data[
+                    "poster_index"
+                ] = index
+
+                await start_carousel(
+
+                    context,
+
+                    chat_id,
+
+                    sent.message_id,
+
+                    movie,
+
+                )
+
+                return
+
+            except Exception:
+
+                traceback.print_exc()
+
+        # -------------------------------------------------
+        # Fallback welcome image
+        # -------------------------------------------------
+
+        try:
+
+            sent = await context.bot.send_photo(
+
+                chat_id=chat_id,
+
+                photo=WELCOME_IMAGE,
+
+                caption=home_caption(),
+
+                parse_mode="HTML",
+
+                reply_markup=keyboard,
+
+            )
+
+            try:
+
+                await message.delete()
+
+            except Exception:
+
+                pass
+
+            return
 
         except Exception:
 
             try:
 
-                sent = await message.reply_text(
-                    home_caption(
-                        movie
-                    ),
+                await message.edit_text(
+
+                    home_caption(),
+
                     parse_mode="HTML",
+
                     reply_markup=keyboard,
+
                 )
-
-                if (
-                    movie
-                    and movie.get(
-                        "poster_file_id"
-                    )
-                ):
-
-                    await start_carousel(
-                        context,
-                        chat_id,
-                        sent.message_id,
-                        movie,
-                    )
 
             except Exception:
 
@@ -1383,6 +1456,10 @@ async def show_home(
 
     chat = update.effective_chat
 
+    await stop_carousel(
+        chat.id
+    )
+
     if (
         movie
         and movie.get(
@@ -1393,22 +1470,35 @@ async def show_home(
         try:
 
             sent = await chat.send_photo(
+
                 photo=movie[
                     "poster_file_id"
                 ],
+
                 caption=home_caption(
                     movie
                 ),
+
                 parse_mode="HTML",
+
                 reply_markup=keyboard,
+
             )
 
-            # Start automatic carousel.
+            context.user_data[
+                "poster_index"
+            ] = index
+
             await start_carousel(
+
                 context,
+
                 chat.id,
+
                 sent.message_id,
+
                 movie,
+
             )
 
             return
@@ -1424,18 +1514,27 @@ async def show_home(
     try:
 
         await chat.send_photo(
+
             photo=WELCOME_IMAGE,
+
             caption=home_caption(),
+
             parse_mode="HTML",
+
             reply_markup=keyboard,
+
         )
 
     except Exception:
 
         await chat.send_message(
+
             text=home_caption(),
+
             parse_mode="HTML",
+
             reply_markup=keyboard,
+
         )
 
 
@@ -1451,7 +1550,6 @@ async def start_command(
     user = update.effective_user
 
     if not user:
-
         return
 
     joined = await is_member(
@@ -1462,12 +1560,16 @@ async def start_command(
     if not joined:
 
         await update.message.reply_text(
+
             "🎬 <b>Movie Myanmar</b>\n\n"
             "အရင်ဆုံး Movie Myanmar Channel ကို "
             "Join လုပ်ပေးပါ 😝❤️\n\n"
             "Join ပြီးရင် <b>✅ I Joined</b> ကိုနှိပ်ပါ။",
+
             parse_mode="HTML",
+
             reply_markup=join_keyboard(),
+
         )
 
         return
@@ -1509,17 +1611,27 @@ async def check_join_callback(
     if not joined:
 
         await query.answer(
+
             "❌ Channel ကို Join မလုပ်ရသေးဘူးနော် 😝",
+
             show_alert=True,
+
         )
 
         return
 
+    await stop_carousel(
+        query.message.chat_id
+    )
+
     await query.message.edit_text(
+
         "✅ <b>Join အောင်မြင်ပြီ!</b>\n\n"
         "🎬 Movie Myanmar ထဲကို "
         "ဝင်လို့ရပါပြီ ❤️",
+
         parse_mode="HTML",
+
     )
 
     await asyncio.sleep(
@@ -1543,10 +1655,6 @@ async def start_search(
 
     user = update.effective_user
 
-    await stop_carousel(
-        update.callback_query.message.chat_id
-    )
-
     user_search_mode[
         user.id
     ] = True
@@ -1556,13 +1664,18 @@ async def start_search(
     ] = False
 
     text = (
+
         "🔎 <b>Movie Search</b>\n\n"
+
         "ရှာချင်တဲ့ Movie နာမည်ကို ရိုက်ပေးပါ။\n\n"
+
         "ဥပမာ —\n"
         "🎬 Avatar\n"
         "🎬 John Wick\n"
         "🎬 Avengers\n\n"
+
         "❌ ပြန်ထွက်ချင်ရင် <b>Home</b> လို့ရိုက်ပါ။"
+
     )
 
     if update.callback_query:
@@ -1574,8 +1687,11 @@ async def start_search(
         try:
 
             await query.message.edit_caption(
+
                 caption=text,
+
                 parse_mode="HTML",
+
             )
 
         except Exception:
@@ -1583,8 +1699,11 @@ async def start_search(
             try:
 
                 await query.message.edit_text(
+
                     text,
+
                     parse_mode="HTML",
+
                 )
 
             except Exception:
@@ -1594,8 +1713,11 @@ async def start_search(
     else:
 
         await update.message.reply_text(
+
             text,
+
             parse_mode="HTML",
+
         )
 
 
@@ -1612,10 +1734,6 @@ async def show_latest_movies(
 
     await query.answer()
 
-    await stop_carousel(
-        query.message.chat_id
-    )
-
     latest = get_latest_movies(
         15
     )
@@ -1623,33 +1741,48 @@ async def show_latest_movies(
     if not latest:
 
         text = (
+
             "🆕 <b>Latest Movies</b>\n\n"
+
             "အခုထိ Movie မရှိသေးဘူး 😭"
+
         )
 
         keyboard = InlineKeyboardMarkup([
+
             [
+
                 InlineKeyboardButton(
                     "🏠 Home",
                     callback_data="home",
                 )
+
             ]
+
         ])
 
         try:
 
             await query.message.edit_caption(
+
                 caption=text,
+
                 parse_mode="HTML",
+
                 reply_markup=keyboard,
+
             )
 
         except Exception:
 
             await query.message.edit_text(
+
                 text,
+
                 parse_mode="HTML",
+
                 reply_markup=keyboard,
+
             )
 
         return
@@ -1677,46 +1810,65 @@ async def show_latest_movies(
             )
 
         buttons.append([
+
             InlineKeyboardButton(
+
                 label[:64],
+
                 url=build_movie_link(
                     movie
                 ),
+
             )
+
         ])
 
     buttons.append([
+
         InlineKeyboardButton(
             "🏠 Home",
             callback_data="home",
         )
+
     ])
 
     text = (
+
         "🆕 <b>LATEST MOVIES</b>\n\n"
+
         "🔥 Movie Myanmar မှာ "
         "နောက်ဆုံးတင်ထားတဲ့ကားတွေ\n\n"
+
         f"🎞️ Total: <b>{len(latest)}</b>"
+
     )
 
     try:
 
         await query.message.edit_caption(
+
             caption=text,
+
             parse_mode="HTML",
+
             reply_markup=InlineKeyboardMarkup(
                 buttons
             ),
+
         )
 
     except Exception:
 
         await query.message.edit_text(
+
             text,
+
             parse_mode="HTML",
+
             reply_markup=InlineKeyboardMarkup(
                 buttons
             ),
+
         )
 
 
@@ -1744,36 +1896,27 @@ async def next_poster(
     if not movies:
 
         await query.answer(
+
             "Poster မရှိသေးဘူး 😭",
+
             show_alert=True,
+
         )
 
         return
 
     current = int(
+
         context.user_data.get(
             "poster_index",
             0,
         )
+
     )
 
-    # Find the currently displayed movie if possible.
-    current_movie = None
-
-    if (
-        0 <= current < len(movies)
-    ):
-
-        current_movie = movies[
-            current
-        ]
-
-    # Move to next.
     current += 1
 
-    if current >= len(
-        movies
-    ):
+    if current >= len(movies):
 
         current = 0
 
@@ -1785,51 +1928,112 @@ async def next_poster(
         current
     ]
 
-    try:
-
-        await query.message.edit_media(
-            media=InputMediaPhoto(
-                media=movie[
-                    "poster_file_id"
-                ],
-                caption=home_caption(
-                    movie
-                ),
-                parse_mode="HTML",
-            ),
-            reply_markup=home_keyboard(),
-        )
-
-        # Restart automatic carousel from this movie.
-        await start_carousel(
-            context,
-            chat_id,
-            query.message.message_id,
-            movie,
-        )
-
-    except Exception:
+    if not query.message.photo:
 
         try:
 
-            await query.message.edit_caption(
+            sent = await context.bot.send_photo(
+
+                chat_id=chat_id,
+
+                photo=movie[
+                    "poster_file_id"
+                ],
+
                 caption=home_caption(
                     movie
                 ),
+
                 parse_mode="HTML",
+
                 reply_markup=home_keyboard(),
+
             )
 
+            try:
+
+                await query.message.delete()
+
+            except Exception:
+
+                pass
+
             await start_carousel(
+
                 context,
+
                 chat_id,
-                query.message.message_id,
+
+                sent.message_id,
+
                 movie,
+
             )
 
         except Exception:
 
-            pass
+            traceback.print_exc()
+
+        return
+
+    try:
+
+        await query.message.edit_media(
+
+            media=InputMediaPhoto(
+
+                media=movie[
+                    "poster_file_id"
+                ],
+
+                caption=home_caption(
+                    movie
+                ),
+
+                parse_mode="HTML",
+
+            ),
+
+            reply_markup=home_keyboard(),
+
+        )
+
+    except Exception as e:
+
+        if (
+            "message is not modified"
+            not in str(e).lower()
+        ):
+
+            try:
+
+                await query.message.edit_caption(
+
+                    caption=home_caption(
+                        movie
+                    ),
+
+                    parse_mode="HTML",
+
+                    reply_markup=home_keyboard(),
+
+                )
+
+            except Exception:
+
+                return
+
+    await start_carousel(
+
+        context,
+
+        chat_id,
+
+        query.message.message_id,
+
+        movie,
+
+    )
 
 
 # =========================================================
@@ -1845,29 +2049,36 @@ async def show_categories(
 
     await query.answer()
 
-    await stop_carousel(
-        query.message.chat_id
-    )
-
     text = (
+
         "🎭 <b>MOVIE CATEGORIES</b>\n\n"
+
         "ကြိုက်တဲ့ Genre ကိုရွေးလိုက် 😝🍿"
+
     )
 
     try:
 
         await query.message.edit_caption(
+
             caption=text,
+
             parse_mode="HTML",
+
             reply_markup=category_keyboard(),
+
         )
 
     except Exception:
 
         await query.message.edit_text(
+
             text,
+
             parse_mode="HTML",
+
             reply_markup=category_keyboard(),
+
         )
 
 
@@ -1879,10 +2090,6 @@ async def show_genre(
     query = update.callback_query
 
     await query.answer()
-
-    await stop_carousel(
-        query.message.chat_id
-    )
 
     genre = query.data.replace(
         "genre_",
@@ -1898,50 +2105,72 @@ async def show_genre(
     else:
 
         results = [
+
             movie
+
             for movie in movie_database
+
             if genre in movie.get(
                 "genres",
                 [],
             )
+
         ]
 
     if not results:
 
         text = (
+
             f"🎭 <b>{genre}</b>\n\n"
+
             "ဒီ Genre ထဲမှာ Movie မတွေ့သေးဘူး 😭"
+
         )
 
         keyboard = InlineKeyboardMarkup([
+
             [
+
                 InlineKeyboardButton(
                     "🎭 Categories",
                     callback_data="categories",
                 )
+
             ],
+
             [
+
                 InlineKeyboardButton(
                     "🏠 Home",
                     callback_data="home",
                 )
+
             ],
+
         ])
 
         try:
 
             await query.message.edit_caption(
+
                 caption=text,
+
                 parse_mode="HTML",
+
                 reply_markup=keyboard,
+
             )
 
         except Exception:
 
             await query.message.edit_text(
+
                 text,
+
                 parse_mode="HTML",
+
                 reply_markup=keyboard,
+
             )
 
         return
@@ -1973,51 +2202,77 @@ async def show_genre(
             )
 
         buttons.append([
+
             InlineKeyboardButton(
+
                 label[:64],
+
                 url=build_movie_link(
                     movie
                 ),
+
             )
+
         ])
 
     buttons.append([
+
         InlineKeyboardButton(
+
             "🎭 Categories",
+
             callback_data="categories",
+
         )
+
     ])
 
     buttons.append([
+
         InlineKeyboardButton(
+
             "🏠 Home",
+
             callback_data="home",
+
         )
+
     ])
 
     text = (
+
         f"🎭 <b>{genre}</b>\n\n"
+
         f"🎬 Found: <b>{len(results)}</b>"
+
     )
 
     try:
 
         await query.message.edit_caption(
+
             caption=text,
+
             parse_mode="HTML",
+
             reply_markup=InlineKeyboardMarkup(
                 buttons
             ),
+
         )
 
     except Exception:
 
         await query.message.edit_text(
+
             text,
+
             parse_mode="HTML",
+
             reply_markup=InlineKeyboardMarkup(
                 buttons
             ),
+
         )
 
 
@@ -2034,47 +2289,62 @@ async def show_help(
 
     await query.answer()
 
-    await stop_carousel(
-        query.message.chat_id
-    )
-
     text = (
+
         "ℹ️ <b>Movie Myanmar Help</b>\n\n"
+
         "🔎 <b>Search Movie</b>\n"
         "Movie နာမည်ရိုက်ပြီး ရှာနိုင်တယ်။\n\n"
+
         "🎭 <b>Categories</b>\n"
         "Genre အလိုက် ရှာနိုင်တယ်။\n\n"
+
         "🆕 <b>Latest Movies</b>\n"
         "အသစ်တင်ထားတဲ့ကားတွေ ကြည့်နိုင်တယ်။\n\n"
+
         "🤖 <b>AI Chat</b>\n"
         "Xiao Yu နဲ့ စကားပြောနိုင်တယ်။\n\n"
+
         "📢 <b>Movie Channel</b>\n"
         "Movie Myanmar Channel ကို ဝင်နိုင်တယ်။"
+
     )
 
     keyboard = InlineKeyboardMarkup([
+
         [
+
             InlineKeyboardButton(
                 "🏠 Home",
                 callback_data="home",
             )
+
         ]
+
     ])
 
     try:
 
         await query.message.edit_caption(
+
             caption=text,
+
             parse_mode="HTML",
+
             reply_markup=keyboard,
+
         )
 
     except Exception:
 
         await query.message.edit_text(
+
             text,
+
             parse_mode="HTML",
+
             reply_markup=keyboard,
+
         )
 
 
@@ -2085,10 +2355,14 @@ async def show_help(
 def movie_fallback():
 
     return (
+
         "ဟဲ့ 😒 AI quota ကုန်သွားပြီနော်။\n\n"
+
         "ငါ့ကို Movie မေး 😝🎬\n"
         "ကားရှာပေးတာတော့ မရပ်ဘူးဟဲ့။\n\n"
+
         "ဥပမာ — <b>Avatar ရှာပေး</b> လို့ပြော။"
+
     )
 
 
@@ -2098,10 +2372,6 @@ async def start_ai(
 ):
 
     user = update.effective_user
-
-    await stop_carousel(
-        update.callback_query.message.chat_id
-    )
 
     user_ai_mode[
         user.id
@@ -2116,26 +2386,38 @@ async def start_ai(
     )
 
     remaining = max(
+
         0,
+
         FREE_AI_LIMIT - used,
+
     )
 
     text = (
+
         "🤖 <b>Xiao Yu AI Chat</b>\n\n"
+
         "ဟယ်လို 😝❤️\n"
         "ငါနဲ့ စကားပြောချင်တာလား?\n\n"
+
         f"🎟️ ဒီနေ့ Free AI ကျန်တာ — "
         f"<b>{remaining}</b>\n\n"
+
         "ဘာမဆို ရေးလို့ရတယ်။"
+
     )
 
     keyboard = InlineKeyboardMarkup([
+
         [
+
             InlineKeyboardButton(
                 "🏠 Home",
                 callback_data="home",
             )
+
         ]
+
     ])
 
     if update.callback_query:
@@ -2147,25 +2429,37 @@ async def start_ai(
         try:
 
             await query.message.edit_caption(
+
                 caption=text,
+
                 parse_mode="HTML",
+
                 reply_markup=keyboard,
+
             )
 
         except Exception:
 
             await query.message.edit_text(
+
                 text,
+
                 parse_mode="HTML",
+
                 reply_markup=keyboard,
+
             )
 
     else:
 
         await update.message.reply_text(
+
             text,
+
             parse_mode="HTML",
+
             reply_markup=keyboard,
+
         )
 
 
@@ -2180,6 +2474,7 @@ async def ask_gemini(
         )
 
     prompt = f"""
+
 You are Xiao Yu CyB (小雨), the friendly female AI assistant
 of Movie Myanmar Telegram Bot.
 
@@ -2190,25 +2485,35 @@ If the user asks about movies, help them search movies.
 
 User:
 {user_text}
+
 """
 
     try:
 
         response = (
+
             gemini_client
             .models
             .generate_content(
+
                 model=GEMINI_MODEL,
+
                 contents=prompt,
+
             )
+
         )
 
         return (
+
             response.text
+
             if response
             and response.text
+
             else
             "ဟယ်... ငါဘာပြန်ပြောရမလဲ မသိတော့ဘူး 😭"
+
         )
 
     except Exception:
@@ -2216,8 +2521,10 @@ User:
         traceback.print_exc()
 
         return (
+
             "အခု AI က နည်းနည်းပင်ပန်းနေတယ် 😭\n"
             "ခဏနေ ပြန်မေးနော် ❤️"
+
         )
 
 
@@ -2244,17 +2551,18 @@ CHANNEL_REQUEST_WORDS = [
 ]
 
 
-def is_channel_request(
-    text
-):
+def is_channel_request(text):
 
     normalized = normalize_text(
         text
     )
 
     return any(
+
         word in normalized
+
         for word in CHANNEL_REQUEST_WORDS
+
     )
 
 
@@ -2297,17 +2605,18 @@ MOVIE_INTENT_WORDS = [
 ]
 
 
-def has_movie_intent(
-    text
-):
+def has_movie_intent(text):
 
     normalized = normalize_text(
         text
     )
 
     return any(
+
         word in normalized
+
         for word in MOVIE_INTENT_WORDS
+
     )
 
 
@@ -2326,17 +2635,21 @@ async def handle_special_reply(
     )
 
     if normalized in [
+
         "ဟေး",
         "ဟယ်လို",
         "hello",
         "hi",
         "hey",
+
     ]:
 
         await update.message.reply_text(
+
             "ဟေးဟေး 😝❤️\n"
             "Xiao Yu ဒီမှာရှိတယ်။\n\n"
             "Movie ရှာမလား၊ စကားပြောမလား?"
+
         )
 
         return True
@@ -2344,13 +2657,16 @@ async def handle_special_reply(
     if (
         "နေကောင်းလား"
         in normalized
-        or "နေကောင်း"
+        or
+        "နေကောင်း"
         in normalized
     ):
 
         await update.message.reply_text(
+
             "ကောင်းတယ်ဟဲ့ 😝❤️\n"
             "မင်းကရော?"
+
         )
 
         return True
@@ -2370,17 +2686,21 @@ async def channel_post_handler(
     message = update.channel_post
 
     if not message:
-
         return
 
     if (
+
         str(
             message.chat.username or ""
         ).lower()
-        != MAIN_CHANNEL.replace(
+
+        !=
+
+        MAIN_CHANNEL.replace(
             "@",
             "",
         ).lower()
+
     ):
 
         return
@@ -2390,13 +2710,14 @@ async def channel_post_handler(
     )
 
     if not movie:
-
         return
 
     movie["post_link"] = (
+
         f"https://t.me/"
         f"{message.chat.username}/"
         f"{message.message_id}"
+
     )
 
     existing_index = None
@@ -2406,31 +2727,40 @@ async def channel_post_handler(
     ):
 
         if (
+
             str(
                 old_movie.get(
                     "chat_id"
                 )
             )
-            == str(
+
+            ==
+
+            str(
                 movie.get(
                     "chat_id"
                 )
             )
+
             and
+
             str(
                 old_movie.get(
                     "message_id"
                 )
             )
-            == str(
+
+            ==
+
+            str(
                 movie.get(
                     "message_id"
                 )
             )
+
         ):
 
             existing_index = i
-
             break
 
     if existing_index is not None:
@@ -2462,16 +2792,21 @@ async def channel_post_handler(
     save_movies()
 
     print(
+
         "🎬 Movie saved:",
+
         movie.get(
             "title"
         ),
+
         "Poster:",
+
         bool(
             movie.get(
                 "poster_file_id"
             )
         ),
+
     )
 
 
@@ -2485,13 +2820,11 @@ async def message_handler(
 ):
 
     if not update.message:
-
         return
 
     user = update.effective_user
 
     if not user:
-
         return
 
     text = (
@@ -2499,7 +2832,6 @@ async def message_handler(
     ).strip()
 
     if not text:
-
         return
 
     joined = await is_member(
@@ -2510,23 +2842,36 @@ async def message_handler(
     if not joined:
 
         await update.message.reply_text(
+
             "🔒 <b>Movie Myanmar</b>\n\n"
             "အရင်ဆုံး Channel Join လုပ်ပါ 😝❤️",
+
             parse_mode="HTML",
+
             reply_markup=join_keyboard(),
+
         )
 
         return
+
+    # User started typing.
+    # Stop the home carousel so it does not
+    # keep changing behind the conversation.
+    await stop_carousel(
+        update.effective_chat.id
+    )
 
     normalized = normalize_text(
         text
     )
 
     if normalized in [
+
         "home",
         "menu",
         "ပင်မ",
         "မီနူး",
+
     ]:
 
         user_search_mode[
@@ -2549,10 +2894,14 @@ async def message_handler(
     ):
 
         await update.message.reply_text(
+
             "📢 <b>Movie Myanmar Channel</b>\n\n"
             "👇 ဒီမှာ ဝင်လို့ရတယ် ❤️",
+
             parse_mode="HTML",
+
             reply_markup=movie_keyboard(),
+
         )
 
         return
@@ -2599,28 +2948,39 @@ async def message_handler(
                     )
 
                 buttons.append([
+
                     InlineKeyboardButton(
+
                         label[:64],
+
                         url=build_movie_link(
                             movie
                         ),
+
                     )
+
                 ])
 
             buttons.append([
+
                 InlineKeyboardButton(
                     "🏠 Home",
                     callback_data="home",
                 )
+
             ])
 
             await update.message.reply_text(
+
                 f"🎬 <b>Found {len(results)} Movie(s)</b>\n\n"
                 "👇 ကြည့်ချင်တဲ့ကားကို ရွေးပါ။",
+
                 parse_mode="HTML",
+
                 reply_markup=InlineKeyboardMarkup(
                     buttons
                 ),
+
             )
 
         else:
@@ -2628,14 +2988,23 @@ async def message_handler(
             try:
 
                 await context.bot.send_message(
+
                     chat_id=ADMIN_CHAT_ID,
+
                     text=(
+
                         "🔔 <b>Movie Request</b>\n\n"
+
                         f"🎬 Requested: <b>{text}</b>\n"
+
                         f"👤 User: @{user.username or user.first_name}\n"
+
                         f"🆔 ID: <code>{user.id}</code>"
+
                     ),
+
                     parse_mode="HTML",
+
                 )
 
             except Exception:
@@ -2643,10 +3012,13 @@ async def message_handler(
                 pass
 
             await update.message.reply_text(
+
                 f"😒 <b>{text}</b> ကို "
                 "Movie Myanmar ထဲမှာ မတွေ့သေးဘူးဟာ။\n\n"
                 "📨 Admin ဆီ Request ပို့ထားပြီ။",
+
                 parse_mode="HTML",
+
             )
 
         user_search_mode[
@@ -2692,28 +3064,39 @@ async def message_handler(
                 )
 
             buttons.append([
+
                 InlineKeyboardButton(
+
                     label[:64],
+
                     url=build_movie_link(
                         movie
                     ),
+
                 )
+
             ])
 
         buttons.append([
+
             InlineKeyboardButton(
                 "🏠 Home",
                 callback_data="home",
             )
+
         ])
 
         await update.message.reply_text(
+
             f"🎬 <b>{len(results)} Movie(s) Found</b>\n\n"
             "👇 ကြည့်ချင်တဲ့ကားကို ရွေးပါ။",
+
             parse_mode="HTML",
+
             reply_markup=InlineKeyboardMarkup(
                 buttons
             ),
+
         )
 
         return
@@ -2725,14 +3108,23 @@ async def message_handler(
         try:
 
             await context.bot.send_message(
+
                 chat_id=ADMIN_CHAT_ID,
+
                 text=(
+
                     "🔔 <b>Movie Request</b>\n\n"
+
                     f"🎬 Requested: <b>{text}</b>\n"
+
                     f"👤 User: @{user.username or user.first_name}\n"
+
                     f"🆔 ID: <code>{user.id}</code>"
+
                 ),
+
                 parse_mode="HTML",
+
             )
 
         except Exception:
@@ -2740,45 +3132,46 @@ async def message_handler(
             pass
 
         await update.message.reply_text(
+
             f"😒 <b>{text}</b> ကို "
             "Movie Myanmar ထဲမှာ မတွေ့သေးဘူးဟာ။\n\n"
             "📨 Admin ဆီ Request ပို့ထားပြီ။",
+
             parse_mode="HTML",
+
         )
 
         return
 
     handled = await handle_special_reply(
+
         update,
         context,
         text,
+
     )
 
     if handled:
-
         return
 
     ai_words = [
 
         "စကားပြော",
-
         "စကားပြောမယ်",
-
         "ai",
-
         "xiao",
-
         "小雨",
-
         "ဘာလုပ်နေလဲ",
-
         "နေကောင်းလား",
 
     ]
 
     if any(
+
         word in normalized
+
         for word in ai_words
+
     ):
 
         user_ai_mode[
@@ -2797,8 +3190,11 @@ async def message_handler(
         if used >= FREE_AI_LIMIT:
 
             await update.message.reply_text(
+
                 movie_fallback(),
+
                 parse_mode="HTML",
+
             )
 
             return
@@ -2808,13 +3204,17 @@ async def message_handler(
         )
 
         if (
+
             reply
+
             and not reply.startswith(
                 "အခု AI က"
             )
+
             and not reply.startswith(
                 "AI service"
             )
+
         ):
 
             increase_ai_usage(
@@ -2822,35 +3222,53 @@ async def message_handler(
             )
 
         remaining = max(
+
             0,
+
             FREE_AI_LIMIT
             - get_ai_usage(
                 user.id
             ),
+
         )
 
         await update.message.reply_text(
+
             reply
             + f"\n\n<code>AI ကျန်သေးတာ: {remaining}</code>",
+
             parse_mode="HTML",
+
         )
 
         return
 
     await update.message.reply_text(
+
         "ဟေး 😝❤️\n\n"
+
         "🎬 Movie ရှာချင်ရင် Movie နာမည်ရိုက်ပါ။\n"
-        "🤖 ငါနဲ့စကားပြောချင်ရင် <b>စကားပြောမယ်</b> လို့ပြော။\n\n"
+
+        "🤖 ငါနဲ့စကားပြောချင်ရင် "
+        "<b>စကားပြောမယ်</b> လို့ပြော။\n\n"
+
         "ဒါမှမဟုတ် 👇 <b>Home</b> ကိုနှိပ်ပြီး Menu သုံးလို့ရတယ်။",
+
         parse_mode="HTML",
+
         reply_markup=InlineKeyboardMarkup([
+
             [
+
                 InlineKeyboardButton(
                     "🏠 Home",
                     callback_data="home",
                 )
+
             ]
+
         ]),
+
     )
 
 
@@ -2898,10 +3316,7 @@ async def callback_handler(
 
         return
 
-    # -----------------------------------------------------
-    # Any other menu page should stop the carousel.
-    # -----------------------------------------------------
-
+    # Other screens must stop carousel.
     if query.message:
 
         await stop_carousel(
@@ -3009,19 +3424,19 @@ class HealthHandler(
             )
         )
 
-    def do_GET(
-        self
-    ):
+    def do_GET(self):
 
-        # Render health check.
         if self.path in (
             "/",
             "/health",
         ):
 
             self._send_text(
+
                 200,
+
                 "Movie Myanmar Bot is alive",
+
             )
 
             return
@@ -3031,13 +3446,7 @@ class HealthHandler(
             "Not Found",
         )
 
-    def do_POST(
-        self
-    ):
-
-        # -------------------------------------------------
-        # TELEGRAM WEBHOOK
-        # -------------------------------------------------
+    def do_POST(self):
 
         if self.path != WEBHOOK_PATH:
 
@@ -3047,10 +3456,6 @@ class HealthHandler(
             )
 
             return
-
-        # -------------------------------------------------
-        # CHECK TELEGRAM SECRET TOKEN
-        # -------------------------------------------------
 
         secret = self.headers.get(
             "X-Telegram-Bot-Api-Secret-Token",
@@ -3069,10 +3474,6 @@ class HealthHandler(
             )
 
             return
-
-        # -------------------------------------------------
-        # READ REQUEST BODY
-        # -------------------------------------------------
 
         try:
 
@@ -3119,15 +3520,10 @@ class HealthHandler(
 
             return
 
-        # -------------------------------------------------
-        # CONVERT TELEGRAM JSON TO PTB UPDATE
-        # -------------------------------------------------
-
         try:
 
             if (
-                webhook_application
-                is None
+                webhook_application is None
                 or webhook_loop is None
             ):
 
@@ -3158,15 +3554,14 @@ class HealthHandler(
 
                 return
 
-            # -------------------------------------------------
-            # PUT UPDATE INTO PTB ASYNC QUEUE
-            # -------------------------------------------------
-
             webhook_loop.call_soon_threadsafe(
+
                 webhook_application
                 .update_queue
                 .put_nowait,
+
                 telegram_update,
+
             )
 
             print(
@@ -3200,15 +3595,20 @@ class HealthHandler(
 def start_health_server():
 
     server = HTTPServer(
+
         (
             "0.0.0.0",
             PORT,
         ),
+
         HealthHandler,
+
     )
 
     print(
+
         f"❤️ Health/Webhook server listening on port {PORT}"
+
     )
 
     server.serve_forever()
@@ -3229,59 +3629,76 @@ async def main():
             "BOT_TOKEN is missing"
         )
 
-    # -----------------------------------------------------
-    # CREATE APPLICATION
-    # -----------------------------------------------------
-
     application = (
+
         Application.builder()
+
         .token(BOT_TOKEN)
+
         .updater(None)
+
         .build()
+
     )
 
     # -----------------------------------------------------
-    # REGISTER HANDLERS
+    # HANDLERS
     # -----------------------------------------------------
 
     application.add_handler(
+
         CommandHandler(
             "start",
             start_command,
         )
+
     )
 
     application.add_handler(
+
         CallbackQueryHandler(
             callback_handler
         )
+
     )
 
     application.add_handler(
+
         MessageHandler(
+
             filters.UpdateType.CHANNEL_POST,
+
             channel_post_handler,
+
         )
+
     )
 
     application.add_handler(
+
         MessageHandler(
+
             filters.TEXT
             & ~filters.COMMAND,
+
             message_handler,
+
         )
+
     )
 
     # -----------------------------------------------------
-    # SAVE APPLICATION + EVENT LOOP
+    # SAVE APP + EVENT LOOP
     # -----------------------------------------------------
 
     webhook_application = application
 
-    webhook_loop = asyncio.get_running_loop()
+    webhook_loop = (
+        asyncio.get_running_loop()
+    )
 
     # -----------------------------------------------------
-    # INITIALIZE PTB
+    # INITIALIZE
     # -----------------------------------------------------
 
     await application.initialize()
@@ -3289,16 +3706,19 @@ async def main():
     await application.start()
 
     # -----------------------------------------------------
-    # START HTTP SERVER
+    # HTTP SERVER
     # -----------------------------------------------------
 
     threading.Thread(
+
         target=start_health_server,
+
         daemon=True,
+
     ).start()
 
     # -----------------------------------------------------
-    # SET TELEGRAM WEBHOOK
+    # TELEGRAM WEBHOOK
     # -----------------------------------------------------
 
     webhook_url = (
@@ -3307,17 +3727,25 @@ async def main():
     )
 
     await application.bot.set_webhook(
+
         url=webhook_url,
+
         secret_token=WEBHOOK_SECRET,
+
         allowed_updates=[
+
             "message",
+
             "callback_query",
+
             "channel_post",
+
         ],
+
     )
 
     # -----------------------------------------------------
-    # START LOGS
+    # LOGS
     # -----------------------------------------------------
 
     print(
@@ -3334,13 +3762,15 @@ async def main():
     )
 
     print(
+
         f"🎞️ Netflix Carousel: "
         f"Latest {CAROUSEL_LIMIT} posters / "
         f"{CAROUSEL_INTERVAL}s"
+
     )
 
     # -----------------------------------------------------
-    # KEEP PROCESS ALIVE
+    # KEEP ALIVE
     # -----------------------------------------------------
 
     await asyncio.Event().wait()

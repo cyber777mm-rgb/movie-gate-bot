@@ -138,7 +138,7 @@ AI_USAGE_FILE = os.path.join(
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 GITHUB_REPO = os.getenv(
     "GITHUB_REPO",
-    "cyber777mm-rgb/movie-gate-bot",
+    "cyber777mm-rgb/movie-myanmar-data",
 ).strip().strip("/")
 GITHUB_MOVIE_FILE = os.getenv(
     "GITHUB_MOVIE_FILE",
@@ -773,12 +773,11 @@ def load_movies():
         snapshot,
     )
 
-    if github_enabled() and (
-        changed
-        or snapshot != remote_movies
-        or not remote_movies
-    ):
-        github_put_movies(snapshot)
+    # IMPORTANT:
+    # Do not write to GitHub during startup. The deploy repository
+    # must never be updated just because Render restarted the bot.
+    # Movie changes are backed up only by save_movies() after an
+    # actual movie is added/updated.
 
     print(
         "Loaded movies:",

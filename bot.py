@@ -1,16 +1,14 @@
-from pathlib import Path
-
-src = r'''# Movie Myanmar - single-file bot + embedded Mini App
+# Movie Myanmar - single-file bot + embedded Mini App
 
 import os
 import asyncio
+import base64
 import hashlib
 import json
 import threading
 import re
 import traceback
 import html
-import base64
 from difflib import SequenceMatcher
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -50,33 +48,13 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 MAIN_CHANNEL = "@moviemyanmar567"
 MOVIE_CHANNEL_URL = "https://t.me/+7EGkZEWlzfAyNGM1"
 
+# Private channel used as the actual Movie Storage Channel.
+# If left empty, the bot will automatically accept channel posts
+# from channels that have no public username (private channels),
+# while ignoring the public MAIN_CHANNEL.
 MOVIE_STORAGE_CHAT_ID = os.getenv(
     "MOVIE_STORAGE_CHAT_ID",
     "",
-).strip()
-
-# ============================================================
-# GITHUB MOVIE BACKUP
-# ============================================================
-
-GITHUB_TOKEN = os.getenv(
-    "GITHUB_TOKEN",
-    "",
-).strip()
-
-GITHUB_REPO = os.getenv(
-    "GITHUB_REPO",
-    "cyber777mm-rgb/movie-gate-bot",
-).strip()
-
-GITHUB_MOVIE_FILE = os.getenv(
-    "GITHUB_MOVIE_FILE",
-    "movies.json",
-).strip()
-
-GITHUB_BRANCH = os.getenv(
-    "GITHUB_BRANCH",
-    "main",
 ).strip()
 
 RENDER_URL = "https://movie-gate-bot.onrender.com"
@@ -149,6 +127,170 @@ AI_USAGE_FILE = os.path.join(
 
 
 # ============================================================
+# GITHUB MOVIE BACKUP / PERSISTENT STORAGE
+# ============================================================
+# Render's local filesystem may be reset on redeploy/restart.
+# Movie data is therefore backed up to a GitHub repository when
+# these environment variables are configured on Render.
+#
+# IMPORTANT: Keep the repository PRIVATE if movie records contain
+# private Telegram storage links/file IDs.
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
+GITHUB_REPO = os.getenv(
+    "GITHUB_REPO",
+    "cyber777mm-rgb/movie-gate-bot",
+).strip().strip("/")
+GITHUB_MOVIE_FILE = os.getenv(
+    "GITHUB_MOVIE_FILE",
+    "movies.json",
+).strip().lstrip("/")
+GITHUB_BRANCH = os.getenv(
+    "GITHUB_BRANCH",
+    "main",
+).strip() or "main"
+
+GITHUB_API_BASE = "https://api.github.com"
+github_sync_lock = threading.RLock()
+
+
+def github_headers():
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "movie-myanmar-bot",
+    }
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    return headers
+
+
+def github_enabled():
+    return bool(GITHUB_TOKEN and GITHUB_REPO and GITHUB_MOVIE_FILE)
+
+
+def github_get_movies():
+    """Return (movies, sha) from the GitHub Contents API."""
+    if not github_enabled():
+        return [], None
+
+    url = (
+        f"{GITHUB_API_BASE}/repos/{GITHUB_REPO}/contents/"
+        f"{GITHUB_MOVIE_FILE}?ref={GITHUB_BRANCH}"
+    )
+
+    try:
+        req = Request(
+            url,
+            headers=github_headers(),
+            method="GET",
+        )
+        with urlopen(req, timeout=10) as response:
+            payload = json.loads(
+                response.read().decode("utf-8")
+            )
+
+        encoded = payload.get("content", "")
+        encoded = encoded.replace("\n", "")
+        raw = base64.b64decode(encoded).decode("utf-8")
+        data = json.loads(raw)
+
+        if not isinstance(data, list):
+            data = []
+
+        return data, payload.get("sha")
+
+    except Exception as e:
+        # 404 simply means the backup file does not exist yet.
+        print("GitHub movie load skipped/error:", e)
+        return [], None
+
+
+def github_put_movies(movies):
+    """Create/update the GitHub movie JSON file."""
+    if not github_enabled():
+        return False
+
+    with github_sync_lock:
+        try:
+            # Fetch the latest SHA immediately before writing so that
+            # repeated channel posts do not use a stale SHA.
+            _, sha = github_get_movies()
+
+            payload_text = json.dumps(
+                movies,
+                ensure_ascii=False,
+                indent=2,
+            ) + "\n"
+
+            encoded = base64.b64encode(
+                payload_text.encode("utf-8")
+            ).decode("ascii")
+
+            url = (
+                f"{GITHUB_API_BASE}/repos/{GITHUB_REPO}/contents/"
+                f"{GITHUB_MOVIE_FILE}"
+            )
+
+            body = {
+                "message": "Update Movie Myanmar movie database",
+                "content": encoded,
+                "branch": GITHUB_BRANCH,
+            }
+
+            if sha:
+                body["sha"] = sha
+
+            req = Request(
+                url,
+                data=json.dumps(body).encode("utf-8"),
+                headers={
+                    **github_headers(),
+                    "Content-Type": "application/json",
+                },
+                method="PUT",
+            )
+
+            with urlopen(req, timeout=15) as response:
+                response.read()
+
+            print(
+                "GitHub movie backup saved:",
+                len(movies),
+                "movies",
+            )
+            return True
+
+        except Exception as e:
+            print("GitHub movie backup error:", e)
+            return False
+
+
+def github_background_save(snapshot):
+    """Save movie data without blocking Telegram update handling."""
+    if not github_enabled():
+        return
+
+    def worker():
+        try:
+            # Merge with whatever is currently in GitHub so an older
+            # background worker can never intentionally erase newer data.
+            remote_movies, _ = github_get_movies()
+            merged = merge_movie_lists(
+                remote_movies if isinstance(remote_movies, list) else [],
+                snapshot if isinstance(snapshot, list) else [],
+            )
+            github_put_movies(merged)
+        except Exception:
+            print("GitHub background save error:")
+            print(traceback.format_exc())
+
+    threading.Thread(
+        target=worker,
+        daemon=True,
+        name="github-movie-backup",
+    ).start()
+
+
+# ============================================================
 # GLOBAL STATE
 # ============================================================
 
@@ -166,7 +308,6 @@ poster_cache = {}
 
 movie_lock = threading.RLock()
 ai_lock = threading.RLock()
-github_lock = threading.RLock()
 
 
 # ============================================================
@@ -311,217 +452,15 @@ def save_json(path, data):
 
 
 # ============================================================
-# GITHUB MOVIE BACKUP
-# ============================================================
-
-def github_request(
-    method,
-    url,
-    body=None,
-):
-    if not GITHUB_TOKEN:
-        return None
-
-    try:
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {GITHUB_TOKEN}",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "Movie-Myanmar-Bot",
-        }
-
-        data = None
-
-        if body is not None:
-            data = json.dumps(
-                body,
-                ensure_ascii=False,
-            ).encode("utf-8")
-
-            headers["Content-Type"] = (
-                "application/json"
-            )
-
-        request = Request(
-            url,
-            data=data,
-            headers=headers,
-            method=method,
-        )
-
-        with urlopen(
-            request,
-            timeout=20,
-        ) as response:
-            raw = response.read()
-
-        if not raw:
-            return {}
-
-        return json.loads(
-            raw.decode("utf-8")
-        )
-
-    except Exception as e:
-        print(
-            "GitHub request error:",
-            method,
-            url,
-            e,
-        )
-        return None
-
-
-def github_load_movies():
-    if not GITHUB_TOKEN:
-        print(
-            "GitHub backup disabled: "
-            "GITHUB_TOKEN is missing"
-        )
-        return []
-
-    url = (
-        "https://api.github.com/repos/"
-        + GITHUB_REPO
-        + "/contents/"
-        + GITHUB_MOVIE_FILE
-        + "?ref="
-        + GITHUB_BRANCH
-    )
-
-    result = github_request(
-        "GET",
-        url,
-    )
-
-    if not result:
-        print(
-            "GitHub movies.json not found "
-            "or could not be loaded."
-        )
-        return []
-
-    try:
-        encoded = result.get(
-            "content",
-            "",
-        )
-
-        if not encoded:
-            return []
-
-        decoded = base64.b64decode(
-            encoded
-        ).decode("utf-8")
-
-        movies = json.loads(
-            decoded
-        )
-
-        if isinstance(
-            movies,
-            list,
-        ):
-            print(
-                "Loaded movies from GitHub:",
-                len(movies),
-            )
-            return movies
-
-    except Exception as e:
-        print(
-            "GitHub movie decode error:",
-            e,
-        )
-
-    return []
-
-
-def github_save_movies(movies):
-    if not GITHUB_TOKEN:
-        return False
-
-    try:
-        content = json.dumps(
-            movies,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-        encoded = base64.b64encode(
-            content.encode("utf-8")
-        ).decode("ascii")
-
-        api_url = (
-            "https://api.github.com/repos/"
-            + GITHUB_REPO
-            + "/contents/"
-            + GITHUB_MOVIE_FILE
-        )
-
-        current = github_request(
-            "GET",
-            api_url
-            + "?ref="
-            + GITHUB_BRANCH,
-        )
-
-        sha = None
-
-        if isinstance(
-            current,
-            dict,
-        ):
-            sha = current.get(
-                "sha"
-            )
-
-        payload = {
-            "message": (
-                "Update Movie Myanmar movie database"
-            ),
-            "content": encoded,
-            "branch": GITHUB_BRANCH,
-        }
-
-        if sha:
-            payload["sha"] = sha
-
-        result = github_request(
-            "PUT",
-            api_url,
-            payload,
-        )
-
-        if (
-            isinstance(result, dict)
-            and result.get("content")
-        ):
-            print(
-                "GitHub movie backup saved:",
-                len(movies),
-            )
-            return True
-
-        print(
-            "GitHub movie backup failed:",
-            result,
-        )
-
-    except Exception as e:
-        print(
-            "GitHub save movies error:",
-            e,
-        )
-
-    return False
-
-
-# ============================================================
 # OLD DATA MIGRATION
 # ============================================================
 
 def merge_movie_lists(primary, secondary):
+    """
+    Merge two movie lists without duplicating stable records.
+    Primary records win when the same ID exists.
+    """
+
     result = []
     seen = set()
 
@@ -570,6 +509,10 @@ def migrate_old_data():
     current_ai_file = os.path.abspath(
         AI_USAGE_FILE
     )
+
+    # --------------------------------------------------------
+    # MOVIES
+    # --------------------------------------------------------
 
     if old_movie_file != current_movie_file:
         try:
@@ -629,6 +572,10 @@ def migrate_old_data():
             print(
                 traceback.format_exc()
             )
+
+    # --------------------------------------------------------
+    # AI USAGE
+    # --------------------------------------------------------
 
     if old_ai_file != current_ai_file:
         try:
@@ -796,63 +743,50 @@ def load_movies():
         [],
     )
 
-    if not isinstance(
-        local_movies,
-        list,
-    ):
+    if not isinstance(local_movies, list):
         local_movies = []
 
-    github_movies = github_load_movies()
+    # Load the durable GitHub copy when configured, then merge both
+    # sources. This is what keeps existing movies alive after a
+    # Render restart/redeploy. Local records win on duplicate IDs.
+    remote_movies = []
+    if github_enabled():
+        remote_movies, _ = github_get_movies()
+        if not isinstance(remote_movies, list):
+            remote_movies = []
 
-    if not isinstance(
-        github_movies,
-        list,
-    ):
-        github_movies = []
-
-    merged = merge_movie_lists(
-        github_movies,
+    movie_database = merge_movie_lists(
+        remote_movies,
         local_movies,
     )
 
-    movie_database = merged
-
     changed = normalize_movie_database()
 
+    # Always write the merged result locally. If GitHub is enabled,
+    # also refresh the durable copy so both sides contain the same
+    # complete movie list.
     with movie_lock:
-        snapshot = list(
-            movie_database
-        )
+        snapshot = list(movie_database)
 
-    if snapshot:
-        save_json(
-            MOVIE_DB_FILE,
-            snapshot,
-        )
+    save_json(
+        MOVIE_DB_FILE,
+        snapshot,
+    )
 
-    if GITHUB_TOKEN and snapshot:
-        local_count = len(
-            local_movies
-        )
-
-        github_count = len(
-            github_movies
-        )
-
-        if (
-            local_count != len(snapshot)
-            or github_count != len(snapshot)
-            or changed
-        ):
-            with github_lock:
-                github_save_movies(
-                    snapshot
-                )
+    if github_enabled() and (
+        changed
+        or snapshot != remote_movies
+        or not remote_movies
+    ):
+        github_put_movies(snapshot)
 
     print(
         "Loaded movies:",
         len(movie_database),
-        "from local + GitHub backup",
+        "from",
+        MOVIE_DB_FILE,
+        "GitHub backup:",
+        "ON" if github_enabled() else "OFF",
     )
 
 
@@ -862,16 +796,16 @@ def save_movies():
             movie_database
         )
 
+    # Local save happens immediately so the current process never
+    # depends on GitHub being reachable.
     save_json(
         MOVIE_DB_FILE,
         snapshot,
     )
 
-    if GITHUB_TOKEN:
-        with github_lock:
-            github_save_movies(
-                snapshot
-            )
+    # Durable backup happens in the background so a Telegram channel
+    # post is not delayed by GitHub network latency.
+    github_background_save(snapshot)
 
 
 def load_ai_usage():
@@ -2278,11 +2212,22 @@ async def callback_handler(
 # ============================================================
 
 def is_movie_storage_channel(message):
+    """
+    Decide whether a channel post is a Movie Storage post.
+
+    Preferred:
+        MOVIE_STORAGE_CHAT_ID=<private channel id>
+
+    Automatic fallback:
+        A channel without a public username is treated as the
+        private Movie Storage Channel, while MAIN_CHANNEL is ignored.
+    """
     if not message or not message.chat:
         return False
 
     chat_id = str(message.chat_id)
 
+    # Explicit storage channel ID wins when configured.
     if MOVIE_STORAGE_CHAT_ID:
         return chat_id == MOVIE_STORAGE_CHAT_ID
 
@@ -2297,13 +2242,27 @@ def is_movie_storage_channel(message):
         .lower()
     )
 
+    # Never treat the public main channel as storage.
     if username == expected_main:
         return False
 
+    # Private Telegram channels normally have no username.
+    # Since the bot receives channel_post only from channels where
+    # it has access, this is a safe automatic fallback for the
+    # user's private Movie Storage Channel.
     return not username
 
 
 def build_storage_post_link(message):
+    """
+    Build the direct Telegram link for a private channel post.
+
+    Private channel links use:
+        https://t.me/c/<internal_channel_id>/<message_id>
+
+    Telegram chat IDs are normally -100xxxxxxxxxx, so the -100
+    prefix is removed for the /c/ URL.
+    """
     chat_id = str(message.chat_id)
     message_id = message.message_id
 
@@ -2314,6 +2273,8 @@ def build_storage_post_link(message):
             f"{message_id}"
         )
 
+    # Fallback for a public channel, if the storage channel ever
+    # has a username.
     if message.chat.username:
         return (
             "https://t.me/"
@@ -2333,6 +2294,9 @@ async def channel_post_handler(
     if not message:
         return
 
+    # IMPORTANT:
+    # Do not save posts from the public Main Channel anymore.
+    # Movie records now come from the Private Movie Storage Channel.
     if not is_movie_storage_channel(message):
         return
 
@@ -2340,10 +2304,13 @@ async def channel_post_handler(
         message
     )
 
+    # The actual movie link must point to the STORAGE post,
+    # not the Main Channel post.
     movie["post_link"] = build_storage_post_link(
         message
     )
 
+    # Mark the source so future migrations/debugging are clear.
     movie["storage_channel"] = str(
         message.chat_id
     )
@@ -2427,56 +2394,741 @@ MINI_APP_HTML = r'''<!doctype html>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
 <style>
-*{box-sizing:border-box}
-body{margin:0;background:#07070d;color:#f6f4ff;font-family:Arial,sans-serif;overflow-x:hidden}
-.app{width:100%;min-height:100vh;background:radial-gradient(circle at 20% 0,#22104a 0,#0b0913 38%,#05050a 100%);padding-bottom:28px}
-.top{position:sticky;top:0;z-index:10;padding:18px 16px 12px;background:rgba(7,7,13,.82);backdrop-filter:blur(16px);border-bottom:1px solid #282039}
-.brand{font-size:24px;font-weight:900;letter-spacing:1px}.brand span{color:#6cf6ff}.sub{font-size:12px;color:#aaa3bd;margin-top:4px}
-.search{margin-top:15px;display:flex;gap:8px}.search input{flex:1;background:#11101b;border:1px solid #302846;border-radius:14px;color:#fff;padding:13px 14px;outline:none}.search input::placeholder{color:#858094}.search button,.pill{border:0;border-radius:13px;padding:0 15px;background:linear-gradient(135deg,#5af5ff,#bb5cff);color:#08080e;font-weight:800}
-.section{padding:18px 14px 0}.sectionhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:11px}.sectionhead h2{font-size:16px;margin:0}.muted{color:#8f899f;font-size:11px}
-.rail{display:flex;gap:11px;overflow-x:auto;padding-bottom:5px;scroll-snap-type:x mandatory}.rail::-webkit-scrollbar{display:none}
-.card{min-width:150px;width:150px;scroll-snap-align:start;background:#100e18;border:1px solid #29233a;border-radius:16px;overflow:hidden;box-shadow:0 10px 30px #0007;cursor:pointer}.card:active{transform:scale(.98)}
-.poster{height:215px;width:100%;object-fit:cover;background:#181522}.ct{padding:10px}.title{font-size:13px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta{font-size:10px;color:#9d96ad;margin-top:5px}
-.chips{display:flex;gap:8px;flex-wrap:wrap}.chip{padding:10px 13px;border:1px solid #51456e;background:#171326;color:#fff;border-radius:13px;font-size:12px;font-weight:800;cursor:pointer;transition:.15s ease;text-shadow:0 1px 2px #000}.chip:hover{background:#282044;border-color:#7c6aa5}.chip:active{transform:scale(.96)}.chip.active{background:linear-gradient(135deg,#5af5ff,#bb5cff);color:#07070d;border-color:transparent;text-shadow:none}
-.nav{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.nav button{padding:12px 7px;border:1px solid #302a43;background:#11101a;color:#fff;border-radius:13px;font-weight:700}.nav button:active{background:#211b31}
-.empty{padding:30px 10px;text-align:center;color:#9992a8}.overlay{display:none;position:fixed;inset:0;background:#000b;z-index:30;padding:30px 14px}.modal{margin:auto;width:100%;max-width:480px;background:#11101a;border:1px solid #3a3150;border-radius:20px;overflow:hidden;max-height:90vh;overflow-y:auto}.modal img{width:100%;max-height:390px;object-fit:cover}.mb{padding:16px}.close{float:right;background:#292338;border:0;color:#fff;border-radius:10px;padding:7px 11px;margin:10px}.open{display:block;width:100%;padding:13px;border:0;border-radius:13px;background:linear-gradient(135deg,#5af5ff,#bb5cff);font-weight:900;margin-top:14px}.loader{text-align:center;padding:20px;color:#aaa}
+*{
+    box-sizing:border-box
+}
+
+body{
+    margin:0;
+    background:#07070d;
+    color:#f6f4ff;
+    font-family:Arial,sans-serif;
+    overflow-x:hidden
+}
+
+.app{
+    width:100%;
+    min-height:100vh;
+    background:
+        radial-gradient(
+            circle at 20% 0,
+            #22104a 0,
+            #0b0913 38%,
+            #05050a 100%
+        );
+    padding-bottom:28px
+}
+
+.top{
+    position:sticky;
+    top:0;
+    z-index:10;
+    padding:18px 16px 12px;
+    background:rgba(7,7,13,.82);
+    backdrop-filter:blur(16px);
+    border-bottom:1px solid #282039
+}
+
+.brand{
+    font-size:24px;
+    font-weight:900;
+    letter-spacing:1px
+}
+
+.brand span{
+    color:#6cf6ff
+}
+
+.sub{
+    font-size:12px;
+    color:#aaa3bd;
+    margin-top:4px
+}
+
+.search{
+    margin-top:15px;
+    display:flex;
+    gap:8px
+}
+
+.search input{
+    flex:1;
+    background:#11101b;
+    border:1px solid #302846;
+    border-radius:14px;
+    color:#fff;
+    padding:13px 14px;
+    outline:none
+}
+
+.search input::placeholder{
+    color:#858094
+}
+
+.search button,
+.pill{
+    border:0;
+    border-radius:13px;
+    padding:0 15px;
+    background:linear-gradient(
+        135deg,
+        #5af5ff,
+        #bb5cff
+    );
+    color:#08080e;
+    font-weight:800
+}
+
+.section{
+    padding:18px 14px 0
+}
+
+.sectionhead{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    margin-bottom:11px
+}
+
+.sectionhead h2{
+    font-size:16px;
+    margin:0
+}
+
+.muted{
+    color:#8f899f;
+    font-size:11px
+}
+
+.rail{
+    display:flex;
+    gap:11px;
+    overflow-x:auto;
+    padding-bottom:5px;
+    scroll-snap-type:x mandatory
+}
+
+.rail::-webkit-scrollbar{
+    display:none
+}
+
+.card{
+    min-width:150px;
+    width:150px;
+    scroll-snap-align:start;
+    background:#100e18;
+    border:1px solid #29233a;
+    border-radius:16px;
+    overflow:hidden;
+    box-shadow:0 10px 30px #0007;
+    cursor:pointer
+}
+
+.card:active{
+    transform:scale(.98)
+}
+
+.poster{
+    height:215px;
+    width:100%;
+    object-fit:cover;
+    background:#181522
+}
+
+.ct{
+    padding:10px
+}
+
+.title{
+    font-size:13px;
+    font-weight:800;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis
+}
+
+.meta{
+    font-size:10px;
+    color:#9d96ad;
+    margin-top:5px
+}
+
+.chips{
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap
+}
+
+.chip{
+    padding:10px 13px;
+    border:1px solid #51456e;
+    background:#171326;
+    color:#ffffff;
+    border-radius:13px;
+    font-size:12px;
+    font-weight:800;
+    cursor:pointer;
+    transition:.15s ease;
+    text-shadow:0 1px 2px #000
+}
+
+.chip:hover{
+    background:#282044;
+    border-color:#7c6aa5
+}
+
+.chip:active{
+    transform:scale(.96)
+}
+
+.chip.active{
+    background:linear-gradient(
+        135deg,
+        #5af5ff,
+        #bb5cff
+    );
+    color:#07070d;
+    border-color:transparent;
+    text-shadow:none
+}
+
+.nav{
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:9px
+}
+
+.nav button{
+    padding:12px 7px;
+    border:1px solid #302a43;
+    background:#11101a;
+    color:#ffffff;
+    border-radius:13px;
+    font-weight:700
+}
+
+.nav button:active{
+    background:#211b31
+}
+
+.empty{
+    padding:30px 10px;
+    text-align:center;
+    color:#9992a8
+}
+
+.overlay{
+    display:none;
+    position:fixed;
+    inset:0;
+    background:#000b;
+    z-index:30;
+    padding:30px 14px
+}
+
+.modal{
+    margin:auto;
+    width:100%;
+    max-width:480px;
+    background:#11101a;
+    border:1px solid #3a3150;
+    border-radius:20px;
+    overflow:hidden;
+    max-height:90vh;
+    overflow-y:auto
+}
+
+.modal img{
+    width:100%;
+    max-height:390px;
+    object-fit:cover
+}
+
+.mb{
+    padding:16px
+}
+
+.close{
+    float:right;
+    background:#292338;
+    border:0;
+    color:white;
+    border-radius:10px;
+    padding:7px 11px;
+    margin:10px
+}
+
+.open{
+    display:block;
+    width:100%;
+    padding:13px;
+    border:0;
+    border-radius:13px;
+    background:linear-gradient(
+        135deg,
+        #5af5ff,
+        #bb5cff
+    );
+    font-weight:900;
+    margin-top:14px
+}
+
+.loader{
+    text-align:center;
+    padding:20px;
+    color:#aaa
+}
 </style>
 </head>
+
 <body>
+
 <main class="app">
+
 <header class="top">
-<div class="brand">MOVIE <span>MYANMAR</span></div>
-<div class="sub">Xiao Yu CyB • Cinema Mini App</div>
-<div class="search"><input id="q" placeholder="Search movie..."><button onclick="searchMovies()">🔎</button></div>
+
+<div class="brand">
+MOVIE <span>MYANMAR</span>
+</div>
+
+<div class="sub">
+Xiao Yu CyB • Cinema Mini App
+</div>
+
+<div class="search">
+
+<input
+    id="q"
+    placeholder="Search movie..."
+>
+
+<button onclick="searchMovies()">
+🔎
+</button>
+
+</div>
+
 </header>
-<section class="section"><div class="nav"><button onclick="loadLatest()">🔥 Latest</button><button onclick="showGenres()">🎭 Genres</button><button onclick="openAi()">🤖 Xiao Yu</button></div></section>
-<section class="section"><div class="sectionhead"><h2>NOW SHOWING</h2><span class="muted">Swipe →</span></div><div id="rail" class="rail"><div class="loader">Loading movies...</div></div></section>
-<section class="section"><div class="sectionhead"><h2>GENRES</h2></div><div id="genres" class="chips"></div></section>
-<section id="results" class="section"></section>
+
+<section class="section">
+
+<div class="nav">
+
+<button onclick="loadLatest()">
+🔥 Latest
+</button>
+
+<button onclick="showGenres()">
+🎭 Genres
+</button>
+
+<button onclick="openAi()">
+🤖 Xiao Yu
+</button>
+
+</div>
+
+</section>
+
+<section class="section">
+
+<div class="sectionhead">
+
+<h2>
+NOW SHOWING
+</h2>
+
+<span class="muted">
+Swipe →
+</span>
+
+</div>
+
+<div id="rail" class="rail">
+
+<div class="loader">
+Loading movies...
+</div>
+
+</div>
+
+</section>
+
+<section class="section">
+
+<div class="sectionhead">
+
+<h2>
+GENRES
+</h2>
+
+</div>
+
+<div id="genres" class="chips"></div>
+
+</section>
+
+<section
+    id="results"
+    class="section"
+></section>
+
 </main>
-<div id="overlay" class="overlay" onclick="if(event.target===this)closeModal()"><div id="modal" class="modal"></div></div>
+
+<div
+    id="overlay"
+    class="overlay"
+    onclick="if(event.target===this)closeModal()"
+>
+
+<div
+    id="modal"
+    class="modal"
+></div>
+
+</div>
+
 <script>
+
 const tg = window.Telegram?.WebApp;
-if(tg){tg.ready();tg.expand();}
-const $ = id => document.getElementById(id);
-let movies = [];
-function esc(s){return String(s || '').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));}
-function card(m){
- const poster=m.poster?'/api/poster?id='+encodeURIComponent(m.id):'';
- return `<article class="card" onclick="detail('${encodeURIComponent(m.id)}')">${poster?`<img class="poster" src="${poster}" onerror="this.style.visibility='hidden'>`:`<div class="poster"></div>`}<div class="ct"><div class="title">${esc(m.title)}</div><div class="meta">${esc(m.year||'')}${m.quality?' • '+esc(m.quality):''}</div></div></article>`;
+
+if(tg){
+    tg.ready();
+    tg.expand();
 }
-async function api(url){try{const response=await fetch(url,{cache:'no-store'});if(!response.ok)return {};return await response.json();}catch(error){console.error(error);return {};}}
-async function loadLatest(){$('rail').innerHTML='<div class="loader">Loading movies...</div>';const data=await api('/api/latest?limit=20');movies=data.movies||[];$('rail').innerHTML=movies.length?movies.map(card).join(''):'<div class="empty">No movies yet</div>';}
-async function searchMovies(){const query=$('q').value.trim();if(!query)return;const data=await api('/api/search?q='+encodeURIComponent(query));renderResults('SEARCH RESULTS',data.movies||[]);}
-function renderResults(title,arr){$('results').innerHTML=`<div class="sectionhead"><h2>${esc(title)}</h2><span class="muted">${arr.length} found</span></div><div class="rail">${arr.length?arr.map(card).join(''):'<div class="empty">Not found 😒</div>'}</div>`;}
-async function showGenres(){const data=await api('/api/genres');$('genres').innerHTML=(data.genres||[]).map(genre=>`<button class="chip" onclick="genre('${encodeURIComponent(genre)}', this)">${esc(genre)}</button>`).join('');}
-async function genre(encodedGenre,button){document.querySelectorAll('.chip').forEach(x=>x.classList.remove('active'));if(button)button.classList.add('active');const data=await api('/api/genre?name='+encodedGenre);renderResults('🎭 '+decodeURIComponent(encodedGenre),data.movies||[]);}
-async function detail(encodedId){const movieId=decodeURIComponent(encodedId);const data=await api('/api/movie?id='+encodeURIComponent(movieId));if(!data.title)return;const poster=data.poster?'/api/poster?id='+encodeURIComponent(data.id):'';$('modal').innerHTML=`<button class="close" onclick="closeModal()">✕</button>${poster?`<img src="${poster}" alt="">`:''}<div class="mb"><h2>${esc(data.title)}</h2><div class="meta">${esc(data.year||'')}${data.quality?' • '+esc(data.quality):''}${data.audio?' • '+esc(data.audio):''}</div><p>${esc(data.description||'Movie Myanmar')}</p>${data.link?`<a href="${esc(data.link)}" target="_blank" rel="noopener"><button class="open">🎬 Open Movie</button></a>`:''}</div>`;$('overlay').style.display='flex';}
-function closeModal(){$('overlay').style.display='none';}
-function openAi(){if(tg&&typeof tg.sendData==='function'){tg.sendData('ai');setTimeout(()=>tg.close(),150);}else{alert('Open Xiao Yu AI from the Telegram bot menu 😝');}}
-$('q').addEventListener('keydown',e=>{if(e.key==='Enter')searchMovies();});
-loadLatest();showGenres();
+
+const $ = id => document.getElementById(id);
+
+let movies = [];
+
+function esc(s){
+    return String(s || '').replace(
+        /[&<>"]/g,
+        m => ({
+            '&':'&amp;',
+            '<':'&lt;',
+            '>':'&gt;',
+            '"':'&quot;'
+        }[m])
+    );
+}
+
+function card(m){
+
+    const poster =
+        m.poster
+        ? '/api/poster?id=' +
+          encodeURIComponent(m.id)
+        : '';
+
+    return `
+    <article
+        class="card"
+        onclick="detail('${encodeURIComponent(m.id)}')"
+    >
+
+        ${
+            poster
+            ? `<img
+                class="poster"
+                src="${poster}"
+                onerror="this.style.visibility='hidden'"
+            >`
+            : `<div class="poster"></div>`
+        }
+
+        <div class="ct">
+
+            <div class="title">
+                ${esc(m.title)}
+            </div>
+
+            <div class="meta">
+                ${esc(m.year || '')}
+                ${m.quality ? ' • ' + esc(m.quality) : ''}
+            </div>
+
+        </div>
+
+    </article>
+    `;
+}
+
+async function api(url){
+
+    try{
+
+        const response =
+            await fetch(
+                url,
+                {
+                    cache:'no-store'
+                }
+            );
+
+        if(!response.ok){
+            return {};
+        }
+
+        return await response.json();
+
+    }catch(error){
+
+        console.error(error);
+
+        return {};
+
+    }
+}
+
+async function loadLatest(){
+
+    $('rail').innerHTML =
+        '<div class="loader">Loading movies...</div>';
+
+    const data =
+        await api(
+            '/api/latest?limit=20'
+        );
+
+    movies =
+        data.movies || [];
+
+    $('rail').innerHTML =
+        movies.length
+        ? movies.map(card).join('')
+        : '<div class="empty">No movies yet</div>';
+}
+
+async function searchMovies(){
+
+    const query =
+        $('q').value.trim();
+
+    if(!query){
+        return;
+    }
+
+    const data =
+        await api(
+            '/api/search?q=' +
+            encodeURIComponent(query)
+        );
+
+    renderResults(
+        'SEARCH RESULTS',
+        data.movies || []
+    );
+}
+
+function renderResults(
+    title,
+    arr
+){
+
+    $('results').innerHTML = `
+
+        <div class="sectionhead">
+
+            <h2>
+                ${esc(title)}
+            </h2>
+
+            <span class="muted">
+                ${arr.length} found
+            </span>
+
+        </div>
+
+        <div class="rail">
+
+            ${
+                arr.length
+                ? arr.map(card).join('')
+                : '<div class="empty">Not found 😒</div>'
+            }
+
+        </div>
+    `;
+}
+
+async function showGenres(){
+
+    const data =
+        await api(
+            '/api/genres'
+        );
+
+    $('genres').innerHTML =
+        (data.genres || [])
+        .map(
+            genre => `
+            <button
+                class="chip"
+                onclick="genre('${encodeURIComponent(genre)}', this)"
+            >
+                ${esc(genre)}
+            </button>
+            `
+        )
+        .join('');
+}
+
+async function genre(
+    encodedGenre,
+    button
+){
+
+    document
+        .querySelectorAll('.chip')
+        .forEach(
+            x => x.classList.remove('active')
+        );
+
+    if(button){
+        button.classList.add('active');
+    }
+
+    const data =
+        await api(
+            '/api/genre?name=' +
+            encodedGenre
+        );
+
+    renderResults(
+        '🎭 ' +
+        decodeURIComponent(encodedGenre),
+        data.movies || []
+    );
+}
+
+async function detail(
+    encodedId
+){
+
+    const movieId =
+        decodeURIComponent(encodedId);
+
+    const data =
+        await api(
+            '/api/movie?id=' +
+            encodeURIComponent(movieId)
+        );
+
+    if(!data.title){
+        return;
+    }
+
+    const poster =
+        data.poster
+        ? '/api/poster?id=' +
+          encodeURIComponent(data.id)
+        : '';
+
+    $('modal').innerHTML = `
+
+        <button
+            class="close"
+            onclick="closeModal()"
+        >
+            ✕
+        </button>
+
+        ${
+            poster
+            ? `<img src="${poster}" alt="">`
+            : ''
+        }
+
+        <div class="mb">
+
+            <h2>
+                ${esc(data.title)}
+            </h2>
+
+            <div class="meta">
+                ${esc(data.year || '')}
+                ${data.quality ? ' • ' + esc(data.quality) : ''}
+                ${data.audio ? ' • ' + esc(data.audio) : ''}
+            </div>
+
+            <p>
+                ${esc(
+                    data.description
+                    || 'Movie Myanmar'
+                )}
+            </p>
+
+            ${
+                data.link
+                ? `
+                <a
+                    href="${esc(data.link)}"
+                    target="_blank"
+                    rel="noopener"
+                >
+                    <button class="open">
+                        🎬 Open Movie
+                    </button>
+                </a>
+                `
+                : ''
+            }
+
+        </div>
+    `;
+
+    $('overlay').style.display =
+        'flex';
+}
+
+function closeModal(){
+
+    $('overlay').style.display =
+        'none';
+}
+
+function openAi(){
+
+    if(
+        tg &&
+        typeof tg.sendData === 'function'
+    ){
+
+        tg.sendData('ai');
+
+        setTimeout(
+            () => tg.close(),
+            150
+        );
+
+    }else{
+
+        alert(
+            'Open Xiao Yu AI from the Telegram bot menu 😝'
+        );
+
+    }
+}
+
+$('q').addEventListener(
+    'keydown',
+    e => {
+
+        if(
+            e.key === 'Enter'
+        ){
+            searchMovies();
+        }
+
+    }
+);
+
+loadLatest();
+showGenres();
+
 </script>
+
 </body>
 </html>
 '''
@@ -2704,6 +3356,10 @@ class HealthHandler(
                 parsed.query
             )
 
+            # ------------------------------------------------
+            # HEALTH
+            # ------------------------------------------------
+
             if path in (
                 "/",
                 "/health",
@@ -2711,6 +3367,10 @@ class HealthHandler(
                 return self.send_bytes(
                     b"Movie Myanmar Bot is alive"
                 )
+
+            # ------------------------------------------------
+            # MINI APP
+            # ------------------------------------------------
 
             if path in (
                 "/app",
@@ -2722,6 +3382,10 @@ class HealthHandler(
                     ),
                     "text/html; charset=utf-8",
                 )
+
+            # ------------------------------------------------
+            # ALL / LATEST MOVIES
+            # ------------------------------------------------
 
             if path in (
                 "/api/movies",
@@ -2764,6 +3428,10 @@ class HealthHandler(
                     }
                 )
 
+            # ------------------------------------------------
+            # SEARCH
+            # ------------------------------------------------
+
             if path == "/api/search":
                 query = qs.get(
                     "q",
@@ -2786,6 +3454,10 @@ class HealthHandler(
                     }
                 )
 
+            # ------------------------------------------------
+            # GENRES
+            # ------------------------------------------------
+
             if path == "/api/genres":
                 return self.send_json(
                     {
@@ -2794,6 +3466,10 @@ class HealthHandler(
                         )
                     }
                 )
+
+            # ------------------------------------------------
+            # GENRE MOVIES
+            # ------------------------------------------------
 
             if path == "/api/genre":
                 genre = qs.get(
@@ -2833,6 +3509,10 @@ class HealthHandler(
                     }
                 )
 
+            # ------------------------------------------------
+            # SINGLE MOVIE
+            # ------------------------------------------------
+
             if path == "/api/movie":
                 movie_id = qs.get(
                     "id",
@@ -2848,6 +3528,10 @@ class HealthHandler(
                     if movie
                     else {}
                 )
+
+            # ------------------------------------------------
+            # POSTER
+            # ------------------------------------------------
 
             if path == "/api/poster":
                 movie_id = qs.get(
@@ -3058,6 +3742,10 @@ async def main():
         .build()
     )
 
+    # --------------------------------------------------------
+    # COMMANDS
+    # --------------------------------------------------------
+
     application.add_handler(
         CommandHandler(
             "start",
@@ -3065,11 +3753,19 @@ async def main():
         )
     )
 
+    # --------------------------------------------------------
+    # CALLBACKS
+    # --------------------------------------------------------
+
     application.add_handler(
         CallbackQueryHandler(
             callback_handler
         )
     )
+
+    # --------------------------------------------------------
+    # CHANNEL POSTS
+    # --------------------------------------------------------
 
     application.add_handler(
         MessageHandler(
@@ -3077,6 +3773,10 @@ async def main():
             channel_post_handler,
         )
     )
+
+    # --------------------------------------------------------
+    # MINI APP DATA
+    # --------------------------------------------------------
 
     try:
         web_app_data_filter = (
@@ -3095,6 +3795,10 @@ async def main():
             "WebAppData handler skipped:",
             e,
         )
+
+    # --------------------------------------------------------
+    # NORMAL TEXT
+    # --------------------------------------------------------
 
     application.add_handler(
         MessageHandler(
@@ -3116,8 +3820,16 @@ async def main():
         asyncio.get_running_loop()
     )
 
+    # --------------------------------------------------------
+    # START PTB
+    # --------------------------------------------------------
+
     await application.initialize()
     await application.start()
+
+    # --------------------------------------------------------
+    # TELEGRAM MENU BUTTON
+    # --------------------------------------------------------
 
     if (
         WebAppInfo
@@ -3146,11 +3858,19 @@ async def main():
                 e,
             )
 
+    # --------------------------------------------------------
+    # HEALTH SERVER
+    # --------------------------------------------------------
+
     threading.Thread(
         target=start_health_server,
         daemon=True,
         name="movie-http-server",
     ).start()
+
+    # --------------------------------------------------------
+    # WEBHOOK
+    # --------------------------------------------------------
 
     webhook_url = (
         RENDER_URL
@@ -3167,47 +3887,66 @@ async def main():
         ],
     )
 
+    # --------------------------------------------------------
+    # STARTUP LOG
+    # --------------------------------------------------------
+
     print(
         "========================================"
     )
+
     print(
         "Movie Myanmar Bot running"
     )
+
     print(
         "Mini App:",
         RENDER_URL + "/app",
     )
+
     print(
         "Webhook:",
         webhook_url,
     )
+
     print(
         "Movie DB:",
         MOVIE_DB_FILE,
     )
+
     print(
         "Movie Storage Chat ID:",
         MOVIE_STORAGE_CHAT_ID or "(auto: private channel)",
     )
+
     print(
-        "GitHub Backup:",
-        (
-            f"{GITHUB_REPO}/{GITHUB_MOVIE_FILE}"
-            if GITHUB_TOKEN
-            else "DISABLED (GITHUB_TOKEN missing)"
-        ),
+        "GitHub Movie Backup:",
+        "ON" if github_enabled() else "OFF (set GITHUB_TOKEN)",
     )
+
+    if github_enabled():
+        print(
+            "GitHub Movie File:",
+            f"{GITHUB_REPO}/{GITHUB_MOVIE_FILE}@{GITHUB_BRANCH}",
+        )
+
     print(
         "Movies:",
         len(movie_database),
     )
+
     print(
         "AI Model:",
         GEMINI_MODEL,
     )
+
     print(
         "========================================"
     )
+
+    # --------------------------------------------------------
+    # KEEP ALIVE
+    # --------------------------------------------------------
 
     while True:
         await asyncio.sleep(
@@ -3221,13 +3960,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-'''
-
-path = Path("/mnt/data/bot.py")
-path.write_text(src, encoding="utf-8")
-
-# Basic syntax check
-compile(src, str(path), "exec")
-
-print(f"Created: {path}")
-print(f"Size: {path.stat().st_size:,} bytes")

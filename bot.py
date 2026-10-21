@@ -245,6 +245,11 @@ GITHUB_BRANCH = os.getenv(
     "main",
 ).strip() or "main"
 
+# Legacy backup repo used by the previous working deployment.
+# Keep it as a fallback so a missing/new backup repo cannot make
+# the whole movie database appear empty after a Render restart.
+LEGACY_GITHUB_REPO = "cyber777mm-rgb/movie-gate-bot"
+
 GITHUB_API_BASE = "https://api.github.com"
 github_sync_lock = threading.RLock()
 
@@ -263,101 +268,156 @@ def github_enabled():
     return bool(GITHUB_TOKEN and GITHUB_REPO and GITHUB_MOVIE_FILE)
 
 
-def github_get_movies():
-    """Return (movies, sha) from the GitHub Contents API."""
-    if not github_enabled():
+def github_get_movies_from_repo(repo):
+    """Return (movies, sha) from one GitHub repository."""
+    if not (GITHUB_TOKEN and repo and GITHUB_MOVIE_FILE):
         return [], None
 
     url = (
-        f"{GITHUB_API_BASE}/repos/{GITHUB_REPO}/contents/"
+        f"{GITHUB_API_BASE}/repos/{repo}/contents/"
         f"{GITHUB_MOVIE_FILE}?ref={GITHUB_BRANCH}"
     )
 
-    try:
-        req = Request(
-            url,
-            headers=github_headers(),
-            method="GET",
+    req = Request(
+        url,
+        headers=github_headers(),
+        method="GET",
+    )
+
+    with urlopen(req, timeout=10) as response:
+        payload = json.loads(
+            response.read().decode("utf-8")
         )
-        with urlopen(req, timeout=10) as response:
-            payload = json.loads(
-                response.read().decode("utf-8")
-            )
 
-        encoded = payload.get("content", "")
-        encoded = encoded.replace("\n", "")
-        raw = base64.b64decode(encoded).decode("utf-8")
-        data = json.loads(raw)
+    encoded = payload.get("content", "")
+    encoded = encoded.replace("\n", "")
+    raw = base64.b64decode(encoded).decode("utf-8")
+    data = json.loads(raw)
 
-        if not isinstance(data, list):
-            data = []
+    if not isinstance(data, list):
+        data = []
 
-        return data, payload.get("sha")
+    return data, payload.get("sha")
 
-    except Exception as e:
-        # 404 simply means the backup file does not exist yet.
-        print("GitHub movie load skipped/error:", e)
+
+def github_get_movies():
+    """Load movies from the configured repo, then the legacy repo.
+
+    A 404 in the new backup location must never turn a previously
+    working movie database into an empty database.
+    """
+    if not github_enabled():
         return [], None
+
+    repos = [GITHUB_REPO]
+    if LEGACY_GITHUB_REPO not in repos:
+        repos.append(LEGACY_GITHUB_REPO)
+
+    errors = []
+
+    for repo in repos:
+        try:
+            movies, sha = github_get_movies_from_repo(repo)
+            if isinstance(movies, list):
+                print(
+                    "GitHub movie load OK:",
+                    len(movies),
+                    "movies from",
+                    repo,
+                )
+                # Remember which repo supplied the data for the current
+                # process so save operations can use the same source.
+                return movies, sha
+        except Exception as e:
+            errors.append(f"{repo}: {e}")
+
+    print(
+        "GitHub movie load failed; tried:",
+        " | ".join(errors)
+        if errors
+        else "no repositories",
+    )
+    return [], None
 
 
 def github_put_movies(movies):
-    """Create/update the GitHub movie JSON file."""
+    """Create/update the GitHub movie JSON file.
+
+    Prefer the configured repo. If that repo/file is unavailable, fall
+    back to the legacy repo that was used by the earlier working build.
+    """
     if not github_enabled():
         return False
 
     with github_sync_lock:
-        try:
-            # Fetch the latest SHA immediately before writing so that
-            # repeated channel posts do not use a stale SHA.
-            _, sha = github_get_movies()
+        repos = [GITHUB_REPO]
+        if LEGACY_GITHUB_REPO not in repos:
+            repos.append(LEGACY_GITHUB_REPO)
 
-            payload_text = json.dumps(
-                movies,
-                ensure_ascii=False,
-                indent=2,
-            ) + "\n"
+        payload_text = json.dumps(
+            movies,
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n"
 
-            encoded = base64.b64encode(
-                payload_text.encode("utf-8")
-            ).decode("ascii")
+        encoded = base64.b64encode(
+            payload_text.encode("utf-8")
+        ).decode("ascii")
 
-            url = (
-                f"{GITHUB_API_BASE}/repos/{GITHUB_REPO}/contents/"
-                f"{GITHUB_MOVIE_FILE}"
-            )
+        last_error = None
 
-            body = {
-                "message": "Update Movie Myanmar movie database",
-                "content": encoded,
-                "branch": GITHUB_BRANCH,
-            }
+        for repo in repos:
+            try:
+                _, sha = github_get_movies_from_repo(repo)
 
-            if sha:
-                body["sha"] = sha
+                url = (
+                    f"{GITHUB_API_BASE}/repos/{repo}/contents/"
+                    f"{GITHUB_MOVIE_FILE}"
+                )
 
-            req = Request(
-                url,
-                data=json.dumps(body).encode("utf-8"),
-                headers={
-                    **github_headers(),
-                    "Content-Type": "application/json",
-                },
-                method="PUT",
-            )
+                body = {
+                    "message": "Update Movie Myanmar movie database",
+                    "content": encoded,
+                    "branch": GITHUB_BRANCH,
+                }
 
-            with urlopen(req, timeout=15) as response:
-                response.read()
+                if sha:
+                    body["sha"] = sha
 
-            print(
-                "GitHub movie backup saved:",
-                len(movies),
-                "movies",
-            )
-            return True
+                req = Request(
+                    url,
+                    data=json.dumps(body).encode("utf-8"),
+                    headers={
+                        **github_headers(),
+                        "Content-Type": "application/json",
+                    },
+                    method="PUT",
+                )
 
-        except Exception as e:
-            print("GitHub movie backup error:", e)
-            return False
+                with urlopen(req, timeout=15) as response:
+                    response.read()
+
+                print(
+                    "GitHub movie backup saved:",
+                    len(movies),
+                    "movies to",
+                    repo,
+                )
+                return True
+
+            except Exception as e:
+                last_error = e
+                print(
+                    "GitHub backup repo failed:",
+                    repo,
+                    e,
+                )
+
+        print(
+            "GitHub movie backup failed in all repos:",
+            last_error,
+        )
+        return False
 
 
 def github_background_save(snapshot):
@@ -851,10 +911,19 @@ def load_movies():
         if not isinstance(remote_movies, list):
             remote_movies = []
 
-    movie_database = merge_movie_lists(
-        remote_movies,
-        local_movies,
-    )
+    # IMPORTANT: never let a failed GitHub read overwrite a valid local
+    # database with an empty list. This is the key protection for Render
+    # sleep/restart.
+    if remote_movies or not local_movies:
+        movie_database = merge_movie_lists(
+            remote_movies,
+            local_movies,
+        )
+    else:
+        movie_database = merge_movie_lists(
+            local_movies,
+            [],
+        )
 
     changed = normalize_movie_database()
 
@@ -884,23 +953,60 @@ def load_movies():
         "ON" if github_enabled() else "OFF",
     )
 
-
-def save_movies():
-    with movie_lock:
-        snapshot = list(
-            movie_database
+    if github_enabled() and not remote_movies:
+        print(
+            "WARNING: GitHub returned no movie records. Local movies preserved:",
+            len(local_movies),
         )
 
-    # Local save happens immediately so the current process never
-    # depends on GitHub being reachable.
+
+def save_movies():
+    """Persist the complete movie database immediately and durably."""
+    with movie_lock:
+        snapshot = [
+            dict(movie)
+            for movie in movie_database
+            if isinstance(movie, dict)
+        ]
+
+    # Always write the complete local snapshot first.
     save_json(
         MOVIE_DB_FILE,
         snapshot,
     )
 
-    # Durable backup happens in the background so a Telegram channel
-    # post is not delayed by GitHub network latency.
-    github_background_save(snapshot)
+    # GitHub is the durable store on Render because the normal Render
+    # filesystem may be reset on redeploy/restart.  Do the backup now
+    # instead of relying on a daemon thread that can be interrupted.
+    if github_enabled():
+        try:
+            remote_movies, _ = github_get_movies()
+            remote_movies = (
+                remote_movies
+                if isinstance(remote_movies, list)
+                else []
+            )
+
+            # The current snapshot is authoritative for records that
+            # have the same stable movie identity.  Keep older remote
+            # records that are not present locally.
+            merged = merge_movie_lists(
+                snapshot,
+                remote_movies,
+            )
+
+            if not github_put_movies(merged):
+                print(
+                    "WARNING: Movie saved locally, but GitHub backup failed."
+                )
+
+        except Exception:
+            print(
+                "GitHub movie backup error:"
+            )
+            print(
+                traceback.format_exc()
+            )
 
 
 def load_ai_usage():
@@ -4271,16 +4377,6 @@ async def main():
             "BOT_TOKEN is missing"
         )
 
-    # Start the HTTP health server immediately. Render expects the
-    # service port to be listening while the Telegram API startup
-    # calls are still running. Starting it first prevents Render from
-    # treating a slow Telegram/network startup as an early exit.
-    threading.Thread(
-        target=start_health_server,
-        daemon=True,
-        name="movie-http-server",
-    ).start()
-
     application = (
         Application
         .builder()
@@ -4442,6 +4538,16 @@ async def main():
                 "menu web app setup skipped:",
                 e,
             )
+
+    # --------------------------------------------------------
+    # HEALTH SERVER
+    # --------------------------------------------------------
+
+    threading.Thread(
+        target=start_health_server,
+        daemon=True,
+        name="movie-http-server",
+    ).start()
 
     # --------------------------------------------------------
     # WEBHOOK

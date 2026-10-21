@@ -47,6 +47,15 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 MAIN_CHANNEL = "@moviemyanmar567"
 MOVIE_CHANNEL_URL = "https://t.me/+7EGkZEWlzfAyNGM1"
 
+# Private channel used as the actual Movie Storage Channel.
+# If left empty, the bot will automatically accept channel posts
+# from channels that have no public username (private channels),
+# while ignoring the public MAIN_CHANNEL.
+MOVIE_STORAGE_CHAT_ID = os.getenv(
+    "MOVIE_STORAGE_CHAT_ID",
+    "",
+).strip()
+
 RENDER_URL = "https://movie-gate-bot.onrender.com"
 WEBHOOK_PATH = "/telegram-webhook"
 
@@ -2005,6 +2014,80 @@ async def callback_handler(
 # CHANNEL POST HANDLER
 # ============================================================
 
+def is_movie_storage_channel(message):
+    """
+    Decide whether a channel post is a Movie Storage post.
+
+    Preferred:
+        MOVIE_STORAGE_CHAT_ID=<private channel id>
+
+    Automatic fallback:
+        A channel without a public username is treated as the
+        private Movie Storage Channel, while MAIN_CHANNEL is ignored.
+    """
+    if not message or not message.chat:
+        return False
+
+    chat_id = str(message.chat_id)
+
+    # Explicit storage channel ID wins when configured.
+    if MOVIE_STORAGE_CHAT_ID:
+        return chat_id == MOVIE_STORAGE_CHAT_ID
+
+    username = (
+        message.chat.username
+        or ""
+    ).strip().lower()
+
+    expected_main = (
+        MAIN_CHANNEL
+        .lstrip("@")
+        .lower()
+    )
+
+    # Never treat the public main channel as storage.
+    if username == expected_main:
+        return False
+
+    # Private Telegram channels normally have no username.
+    # Since the bot receives channel_post only from channels where
+    # it has access, this is a safe automatic fallback for the
+    # user's private Movie Storage Channel.
+    return not username
+
+
+def build_storage_post_link(message):
+    """
+    Build the direct Telegram link for a private channel post.
+
+    Private channel links use:
+        https://t.me/c/<internal_channel_id>/<message_id>
+
+    Telegram chat IDs are normally -100xxxxxxxxxx, so the -100
+    prefix is removed for the /c/ URL.
+    """
+    chat_id = str(message.chat_id)
+    message_id = message.message_id
+
+    if chat_id.startswith("-100") and message_id:
+        return (
+            "https://t.me/c/"
+            f"{chat_id[4:]}/"
+            f"{message_id}"
+        )
+
+    # Fallback for a public channel, if the storage channel ever
+    # has a username.
+    if message.chat.username:
+        return (
+            "https://t.me/"
+            f"{message.chat.username}/"
+            f"{message_id}"
+        )
+
+    return MOVIE_CHANNEL_URL
+
+
 async def channel_post_handler(
     update,
     context,
@@ -2014,36 +2097,26 @@ async def channel_post_handler(
     if not message:
         return
 
-    username = (
-        message.chat.username
-        or ""
-    ).lower()
-
-    expected_username = (
-        MAIN_CHANNEL
-        .lstrip("@")
-        .lower()
-    )
-
-    if username != expected_username:
+    # IMPORTANT:
+    # Do not save posts from the public Main Channel anymore.
+    # Movie records now come from the Private Movie Storage Channel.
+    if not is_movie_storage_channel(message):
         return
 
     movie = parse_movie_post(
         message
     )
 
-    if message.chat.username:
-        movie["post_link"] = (
-            f"https://t.me/"
-            f"{message.chat.username}/"
-            f"{message.message_id}"
-        )
-    else:
-        movie["post_link"] = (
-            build_movie_link(
-                movie
-            )
-        )
+    # The actual movie link must point to the STORAGE post,
+    # not the Main Channel post.
+    movie["post_link"] = build_storage_post_link(
+        message
+    )
+
+    # Mark the source so future migrations/debugging are clear.
+    movie["storage_channel"] = str(
+        message.chat_id
+    )
 
     movie_id = movie["id"]
     replaced = False
@@ -2094,8 +2167,14 @@ async def channel_post_handler(
     invalidate_carousel()
 
     print(
-        "Saved movie:",
+        "Saved PRIVATE movie:",
         movie.get("title"),
+        "Storage Chat:",
+        message.chat_id,
+        "Message:",
+        message.message_id,
+        "Link:",
+        movie.get("post_link"),
         "ID:",
         movie.get("id"),
         "Total:",
@@ -3636,6 +3715,11 @@ async def main():
     print(
         "Movie DB:",
         MOVIE_DB_FILE,
+    )
+
+    print(
+        "Movie Storage Chat ID:",
+        MOVIE_STORAGE_CHAT_ID or "(auto: private channel)",
     )
 
     print(

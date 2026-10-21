@@ -20,6 +20,8 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
+    InputMediaVideo,
 )
 
 from telegram.ext import (
@@ -124,6 +126,100 @@ AI_USAGE_FILE = os.path.join(
     DATA_DIR,
     "ai_usage.json",
 )
+
+# Automatically learned private Movie Storage Channel ID.
+# MOVIE_STORAGE_CHAT_ID from Render always takes precedence.
+STORAGE_CHANNEL_FILE = os.path.join(
+    DATA_DIR,
+    "storage_channel.json",
+)
+
+# Admin movie uploader state.
+# video -> poster -> caption -> preview -> publish
+uploader_sessions = {}
+album_buffers = {}
+album_tasks = {}
+published_album_ids = set()
+
+
+def load_storage_channel_id():
+    if MOVIE_STORAGE_CHAT_ID:
+        return MOVIE_STORAGE_CHAT_ID
+
+    try:
+        with open(
+            STORAGE_CHANNEL_FILE,
+            "r",
+            encoding="utf-8",
+        ) as f:
+            data = json.load(f)
+
+        chat_id = str(
+            data.get("chat_id", "")
+        ).strip()
+        return chat_id
+    except Exception:
+        return ""
+
+
+def save_storage_channel_id(chat_id):
+    chat_id = str(chat_id or "").strip()
+    if not chat_id or MOVIE_STORAGE_CHAT_ID:
+        return
+
+    try:
+        with open(
+            STORAGE_CHANNEL_FILE,
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump(
+                {"chat_id": chat_id},
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+    except Exception as e:
+        print("Storage channel save error:", e)
+
+
+AUTO_STORAGE_CHAT_ID = load_storage_channel_id()
+
+
+def get_storage_channel_id():
+    return (
+        MOVIE_STORAGE_CHAT_ID
+        or AUTO_STORAGE_CHAT_ID
+        or ""
+    ).strip()
+
+
+def is_admin_user(user_id):
+    return str(user_id) == str(ADMIN_CHAT_ID)
+
+
+def clear_uploader(user_id):
+    uploader_sessions.pop(
+        str(user_id),
+        None,
+    )
+
+
+def uploader_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🚀 PUBLISH",
+                    callback_data="uploader_publish",
+                ),
+                InlineKeyboardButton(
+                    "❌ CANCEL",
+                    callback_data="uploader_cancel",
+                ),
+            ]
+        ]
+    )
 
 
 # ============================================================
@@ -1926,6 +2022,11 @@ async def message_handler(
         or ""
     ).strip()
 
+    # Admin uploader caption step must work without membership gating.
+    if is_admin_user(uid):
+        if await uploader_caption_handler(update, context):
+            return
+
     if not await is_member(
         context.bot,
         uid,
@@ -2099,6 +2200,245 @@ async def message_handler(
 
 
 # ============================================================
+# ADMIN MOVIE UPLOADER
+# ============================================================
+
+async def uploader_video_handler(update, context):
+    message = update.effective_message
+    user = update.effective_user
+    if not message or not user or not is_admin_user(user.id):
+        return False
+
+    file_id = ""
+    if message.video:
+        file_id = message.video.file_id
+    elif message.document:
+        mime = str(message.document.mime_type or "").lower()
+        name = str(message.document.file_name or "").lower()
+        if mime.startswith("video/") or name.endswith((
+            ".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"
+        )):
+            file_id = message.document.file_id
+
+    if not file_id:
+        return False
+
+    uid = str(user.id)
+    uploader_sessions[uid] = {
+        "video_file_id": file_id,
+        "poster_file_id": "",
+        "caption": "",
+        "state": "poster",
+    }
+
+    await message.reply_text(
+        "🎬 Video ရပါပြီ။\n\n"
+        "🖼️ အခု Poster ပုံတစ်ပုံ ပို့ပေးပါ။"
+    )
+    return True
+
+
+async def uploader_photo_handler(update, context):
+    message = update.effective_message
+    user = update.effective_user
+    if not message or not user or not is_admin_user(user.id):
+        return False
+
+    uid = str(user.id)
+    session = uploader_sessions.get(uid)
+    if not session or session.get("state") != "poster":
+        return False
+
+    if not message.photo:
+        return False
+
+    session["poster_file_id"] = message.photo[-1].file_id
+    session["state"] = "caption"
+
+    await message.reply_text(
+        "🖼️ Poster ရပါပြီ။\n\n"
+        "📝 အခု Movie Caption ပို့ပေးပါ။\n"
+        "ဥပမာ — Movie Name (2026) 1080p Myanmar Audio"
+    )
+    return True
+
+
+async def uploader_caption_handler(update, context):
+    message = update.effective_message
+    user = update.effective_user
+    if not message or not user or not is_admin_user(user.id):
+        return False
+
+    uid = str(user.id)
+    session = uploader_sessions.get(uid)
+    if not session or session.get("state") != "caption":
+        return False
+
+    caption = str(message.text or message.caption or "").strip()
+    if not caption:
+        await message.reply_text("📝 Caption လေး ပို့ပေးပါဦး။")
+        return True
+
+    session["caption"] = caption
+    session["state"] = "preview"
+
+    try:
+        await context.bot.send_media_group(
+            chat_id=user.id,
+            media=[
+                InputMediaPhoto(
+                    media=session["poster_file_id"],
+                ),
+                InputMediaVideo(
+                    media=session["video_file_id"],
+                    caption=caption,
+                ),
+            ],
+        )
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=(
+                "👀 <b>Preview</b>\n\n"
+                "အဆင်ပြေရင် <b>PUBLISH</b> နှိပ်ပါ။\n"
+                "မတင်ချင်ရင် <b>CANCEL</b> နှိပ်ပါ။"
+            ),
+            parse_mode="HTML",
+            reply_markup=uploader_keyboard(),
+        )
+    except Exception as e:
+        print("Uploader preview error:", e)
+        await message.reply_text(
+            "❌ Preview ပို့မရသေးဘူး။ ထပ်စမ်းကြည့်ပါ။"
+        )
+
+    return True
+
+
+async def cancel_upload(update, context):
+    query = update.callback_query
+    user = update.effective_user
+    if not user or not is_admin_user(user.id):
+        await query.answer("Admin only", show_alert=True)
+        return
+
+    clear_uploader(user.id)
+    await query.answer("Cancelled")
+    try:
+        await query.edit_message_text("❌ Movie upload cancelled.")
+    except Exception:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="❌ Movie upload cancelled."
+        )
+
+
+async def publish_upload(update, context):
+    query = update.callback_query
+    user = update.effective_user
+    if not user or not is_admin_user(user.id):
+        await query.answer("Admin only", show_alert=True)
+        return
+
+    uid = str(user.id)
+    session = uploader_sessions.get(uid)
+    if not session or session.get("state") != "preview":
+        await query.answer("Upload session မရှိတော့ဘူး။", show_alert=True)
+        return
+
+    storage_id = get_storage_channel_id()
+    if not storage_id:
+        await query.answer("Storage Channel ID မသိသေးဘူး။", show_alert=True)
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=(
+                "⚠️ Private Movie Storage Channel ID ကို auto-detect မလုပ်ရသေးဘူး။\n\n"
+                "Bot ကို Storage Channel ထဲမှာ Admin ထားပြီး၊ အဲဒီ Channel ထဲကို test message တစ်ခု post လုပ်ပေးပါ။\n"
+                "ပြီးရင် ဒီ movie ကို ပြန် upload လုပ်ပါ။"
+            ),
+        )
+        return
+
+    try:
+        sent = await context.bot.send_media_group(
+            chat_id=int(storage_id),
+            media=[
+                InputMediaPhoto(
+                    media=session["poster_file_id"],
+                ),
+                InputMediaVideo(
+                    media=session["video_file_id"],
+                    caption=session["caption"],
+                ),
+            ],
+        )
+
+        sent = sorted(sent, key=lambda m: m.message_id)
+        movie = build_movie_from_messages(
+            sent,
+            session["caption"],
+        )
+        if not movie:
+            raise RuntimeError("Could not build movie record from published album")
+
+        movie["storage_channel"] = str(storage_id)
+        save_movie_record(movie)
+
+        group_id = str(
+            getattr(sent[0], "media_group_id", "") or ""
+        )
+        if group_id:
+            published_album_ids.add(
+                (str(storage_id), group_id)
+            )
+
+        clear_uploader(user.id)
+        await query.answer("Published 🎬")
+        try:
+            await query.edit_message_text(
+                "✅ <b>PUBLISHED</b>\n\n"
+                + html.escape(str(movie.get("title", "Movie")))
+                + "\n\nMini App ထဲမှာလည်း ထည့်ပြီးပါပြီ။",
+                parse_mode="HTML",
+            )
+        except Exception:
+            await context.bot.send_message(
+                chat_id=user.id,
+                text="✅ Movie published successfully."
+            )
+
+        print(
+            "Admin published movie:",
+            movie.get("title"),
+            "Storage:",
+            storage_id,
+            "Messages:",
+            movie.get("storage_message_ids"),
+        )
+
+    except Exception as e:
+        print("Uploader publish error:", e)
+        await query.answer("Publish မအောင်မြင်သေးဘူး။", show_alert=True)
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=(
+                "❌ Publish မအောင်မြင်သေးဘူး။\n\n"
+                "Storage Channel ထဲမှာ Bot က post/media ပို့ခွင့်ရှိမရှိ စစ်ပေးပါ။\n"
+                f"Error: {e}"
+            ),
+        )
+
+
+async def cancel_upload_command(update, context):
+    user = update.effective_user
+    if not user or not is_admin_user(user.id):
+        return
+    clear_uploader(user.id)
+    await update.effective_message.reply_text(
+        "❌ Upload session cancelled."
+    )
+
+
+# ============================================================
 # CALLBACK HANDLER
 # ============================================================
 
@@ -2108,6 +2448,12 @@ async def callback_handler(
 ):
     query = update.callback_query
     data = query.data or ""
+
+    if data == "uploader_publish":
+        return await publish_upload(update, context)
+
+    if data == "uploader_cancel":
+        return await cancel_upload(update, context)
 
     if data == "check_join":
         return await check_join(
@@ -2211,57 +2557,39 @@ async def callback_handler(
 # ============================================================
 
 def is_movie_storage_channel(message):
-    """
-    Decide whether a channel post is a Movie Storage post.
-
-    Preferred:
-        MOVIE_STORAGE_CHAT_ID=<private channel id>
-
-    Automatic fallback:
-        A channel without a public username is treated as the
-        private Movie Storage Channel, while MAIN_CHANNEL is ignored.
-    """
+    """Return True only for the configured/learned private storage channel."""
     if not message or not message.chat:
         return False
 
     chat_id = str(message.chat_id)
 
-    # Explicit storage channel ID wins when configured.
+    # Explicit Render environment variable wins.
     if MOVIE_STORAGE_CHAT_ID:
         return chat_id == MOVIE_STORAGE_CHAT_ID
+
+    # If we already learned the channel, never accept another
+    # private channel by accident.
+    known = get_storage_channel_id()
+    if known:
+        return chat_id == known
 
     username = (
         message.chat.username
         or ""
     ).strip().lower()
 
-    expected_main = (
-        MAIN_CHANNEL
-        .lstrip("@")
-        .lower()
-    )
+    expected_main = MAIN_CHANNEL.lstrip("@").lower()
 
-    # Never treat the public main channel as storage.
     if username == expected_main:
         return False
 
-    # Private Telegram channels normally have no username.
-    # Since the bot receives channel_post only from channels where
-    # it has access, this is a safe automatic fallback for the
-    # user's private Movie Storage Channel.
+    # First private channel post becomes the storage channel.
+    # The bot only receives channel_post updates from channels
+    # where it has access/admin rights.
     return not username
 
 
 def build_storage_post_link(message):
-    """
-    Build the direct Telegram link for a private channel post.
-
-    Private channel links use:
-        https://t.me/c/<internal_channel_id>/<message_id>
-
-    Telegram chat IDs are normally -100xxxxxxxxxx, so the -100
-    prefix is removed for the /c/ URL.
-    """
     chat_id = str(message.chat_id)
     message_id = message.message_id
 
@@ -2272,8 +2600,6 @@ def build_storage_post_link(message):
             f"{message_id}"
         )
 
-    # Fallback for a public channel, if the storage channel ever
-    # has a username.
     if message.chat.username:
         return (
             "https://t.me/"
@@ -2284,83 +2610,295 @@ def build_storage_post_link(message):
     return MOVIE_CHANNEL_URL
 
 
-async def channel_post_handler(
-    update,
-    context,
-):
-    message = update.channel_post
+def build_movie_from_messages(messages, caption_override=None):
+    """Build one canonical movie record from a Telegram media group."""
+    messages = [m for m in messages if m]
+    if not messages:
+        return None
 
-    if not message:
-        return
+    messages.sort(key=lambda m: m.message_id)
 
-    # IMPORTANT:
-    # Do not save posts from the public Main Channel anymore.
-    # Movie records now come from the Private Movie Storage Channel.
-    if not is_movie_storage_channel(message):
-        return
-
-    movie = parse_movie_post(
-        message
+    video_message = next(
+        (
+            m for m in messages
+            if getattr(m, "video", None)
+        ),
+        None,
     )
 
-    # The actual movie link must point to the STORAGE post,
-    # not the Main Channel post.
-    movie["post_link"] = build_storage_post_link(
-        message
+    photo_message = next(
+        (
+            m for m in messages
+            if getattr(m, "photo", None)
+        ),
+        None,
     )
 
-    # Mark the source so future migrations/debugging are clear.
-    movie["storage_channel"] = str(
-        message.chat_id
+    # Some clients may send the movie as a video document.
+    if video_message is None:
+        video_message = next(
+            (
+                m for m in messages
+                if (
+                    getattr(m, "document", None)
+                    and str(
+                        getattr(m.document, "mime_type", "")
+                        or ""
+                    ).lower().startswith("video/")
+                )
+            ),
+            None,
+        )
+
+    caption = str(caption_override or "").strip()
+    if not caption:
+        for m in messages:
+            candidate = str(
+                getattr(m, "caption", "")
+                or getattr(m, "text", "")
+                or ""
+            ).strip()
+            if candidate:
+                caption = candidate
+                break
+
+    if video_message is None:
+        # A poster-only channel post is not a complete movie.
+        return None
+
+    source = video_message
+    text = caption or "Untitled Movie"
+    lines = [
+        x.strip()
+        for x in text.splitlines()
+        if x.strip()
+    ]
+    title = lines[0] if lines else "Untitled Movie"
+
+    year = extract_year(text)
+    quality_match = re.search(
+        r"\b(2160p|4k|1080p|720p|480p)\b",
+        text,
+        re.I,
+    )
+    audio_match = re.search(
+        r"(Burmese|Myanmar|English|Dual|Multi)[ -]?Audio",
+        text,
+        re.I,
     )
 
-    movie_id = movie["id"]
-    replaced = False
+    poster_file_id = ""
+    if photo_message and photo_message.photo:
+        poster_file_id = photo_message.photo[-1].file_id
+
+    movie = {
+        "title": title,
+        "year": year,
+        "quality": (
+            quality_match.group(1).upper()
+            if quality_match else ""
+        ),
+        "audio": (
+            audio_match.group(0)
+            if audio_match else ""
+        ),
+        "original_name": title,
+        "genres": detect_genres(text),
+        "description": text,
+        "post_link": build_storage_post_link(source),
+        "chat_id": str(source.chat_id),
+        "message_id": source.message_id,
+        "poster_file_id": poster_file_id,
+        "media_group_id": str(
+            getattr(source, "media_group_id", "") or ""
+        ),
+        "storage_message_ids": [
+            m.message_id for m in messages
+        ],
+    }
+
+    if getattr(source, "video", None):
+        movie["video_file_id"] = source.video.file_id
+    elif getattr(source, "document", None):
+        movie["video_file_id"] = source.document.file_id
+
+    movie["id"] = generate_movie_id(
+        source.chat_id,
+        source.message_id,
+    )
+
+    return movie
+
+
+def movie_already_saved(movie):
+    if not movie:
+        return False
+
+    chat_id = str(movie.get("chat_id", ""))
+    message_id = movie.get("message_id")
+    group_id = str(movie.get("media_group_id", ""))
+    movie_id = str(movie.get("id", ""))
 
     with movie_lock:
-        for i, old in enumerate(
-            movie_database
-        ):
-            old_id = str(
-                old.get(
-                    "id",
-                    "",
-                )
-            )
-
-            old_chat = str(
-                old.get(
-                    "chat_id",
-                    "",
-                )
-            )
-
-            old_message = old.get(
-                "message_id"
-            )
-
+        for old in movie_database:
+            if movie_id and str(old.get("id", "")) == movie_id:
+                return True
             if (
-                old_id == movie_id
-                or (
-                    old_chat
-                    == str(
-                        message.chat_id
-                    )
-                    and old_message
-                    == message.message_id
-                )
+                chat_id
+                and str(old.get("chat_id", "")) == chat_id
+                and message_id
+                and old.get("message_id") == message_id
             ):
+                return True
+            if (
+                group_id
+                and str(old.get("media_group_id", "")) == group_id
+                and str(old.get("storage_channel", "")) == chat_id
+            ):
+                return True
+    return False
+
+
+def save_movie_record(movie):
+    if not movie:
+        return False
+
+    replaced = False
+    with movie_lock:
+        for i, old in enumerate(movie_database):
+            same = (
+                str(old.get("id", ""))
+                == str(movie.get("id", ""))
+            )
+            if not same:
+                same = (
+                    str(old.get("chat_id", ""))
+                    == str(movie.get("chat_id", ""))
+                    and old.get("message_id")
+                    == movie.get("message_id")
+                )
+            if same:
                 movie_database[i] = movie
                 replaced = True
                 break
 
         if not replaced:
-            movie_database.append(
-                movie
-            )
+            movie_database.append(movie)
 
     save_movies()
     invalidate_carousel()
+    return not replaced
+
+
+async def save_album_as_movie(messages, caption=None):
+    if not messages:
+        return
+
+    messages = sorted(
+        [m for m in messages if m],
+        key=lambda m: m.message_id,
+    )
+
+    group_id = str(
+        getattr(messages[0], "media_group_id", "") or ""
+    )
+    key = (
+        str(messages[0].chat_id),
+        group_id,
+    )
+
+    if key in published_album_ids:
+        return
+
+    movie = build_movie_from_messages(
+        messages,
+        caption,
+    )
+    if not movie:
+        return
+
+    movie["storage_channel"] = str(
+        messages[0].chat_id
+    )
+
+    if movie_already_saved(movie):
+        published_album_ids.add(key)
+        return
+
+    save_movie_record(movie)
+    published_album_ids.add(key)
+
+    print(
+        "Saved PRIVATE movie album:",
+        movie.get("title"),
+        "Storage Chat:",
+        messages[0].chat_id,
+        "Messages:",
+        movie.get("storage_message_ids"),
+        "Link:",
+        movie.get("post_link"),
+        "ID:",
+        movie.get("id"),
+        "Total:",
+        len(movie_database),
+    )
+
+
+async def process_album_later(key):
+    try:
+        await asyncio.sleep(1.2)
+        messages = album_buffers.pop(key, [])
+        album_tasks.pop(key, None)
+        if messages:
+            await save_album_as_movie(messages)
+    except Exception as e:
+        print("Album processing error:", e)
+
+
+async def channel_post_handler(update, context):
+    message = update.channel_post
+
+    if not message or not is_movie_storage_channel(message):
+        return
+
+    global AUTO_STORAGE_CHAT_ID
+
+    # Learn and persist the first valid private storage channel.
+    if not MOVIE_STORAGE_CHAT_ID:
+        discovered = str(message.chat_id)
+        if not AUTO_STORAGE_CHAT_ID:
+            AUTO_STORAGE_CHAT_ID = discovered
+            save_storage_channel_id(discovered)
+            print(
+                "Auto-detected Movie Storage Channel:",
+                discovered,
+            )
+
+    group_id = str(
+        getattr(message, "media_group_id", "") or ""
+    )
+
+    if group_id:
+        key = (
+            str(message.chat_id),
+            group_id,
+        )
+        album_buffers.setdefault(key, []).append(message)
+
+        task = album_tasks.get(key)
+        if task is None or task.done():
+            album_tasks[key] = asyncio.create_task(
+                process_album_later(key)
+            )
+        return
+
+    # Single-post fallback. This also supports older stored movies.
+    movie = build_movie_from_messages([message])
+    if not movie:
+        return
+
+    movie["storage_channel"] = str(message.chat_id)
+    save_movie_record(movie)
 
     print(
         "Saved PRIVATE movie:",
@@ -3796,6 +4334,43 @@ async def main():
         )
 
     # --------------------------------------------------------
+    # ADMIN UPLOADER
+    # --------------------------------------------------------
+
+    application.add_handler(
+        CommandHandler(
+            "cancel_upload",
+            cancel_upload_command,
+        ),
+        group=0,
+    )
+
+    application.add_handler(
+        MessageHandler(
+            filters.VIDEO,
+            uploader_video_handler,
+        ),
+        group=0,
+    )
+
+    application.add_handler(
+        MessageHandler(
+            filters.PHOTO,
+            uploader_photo_handler,
+        ),
+        group=0,
+    )
+
+    # Telegram may receive large movies as Documents (MKV etc.).
+    application.add_handler(
+        MessageHandler(
+            filters.Document.ALL,
+            uploader_video_handler,
+        ),
+        group=0,
+    )
+
+    # --------------------------------------------------------
     # NORMAL TEXT
     # --------------------------------------------------------
 
@@ -3804,7 +4379,8 @@ async def main():
             filters.TEXT
             & ~filters.COMMAND,
             message_handler,
-        )
+        ),
+        group=1,
     )
 
     application.add_error_handler(
@@ -3915,7 +4491,7 @@ async def main():
 
     print(
         "Movie Storage Chat ID:",
-        MOVIE_STORAGE_CHAT_ID or "(auto: private channel)",
+        get_storage_channel_id() or "(auto-detect pending)",
     )
 
     print(

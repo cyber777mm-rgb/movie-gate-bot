@@ -886,52 +886,21 @@ def load_movies():
 
 
 def save_movies():
-    """Persist the complete movie database immediately and durably."""
     with movie_lock:
-        snapshot = [
-            dict(movie)
-            for movie in movie_database
-            if isinstance(movie, dict)
-        ]
+        snapshot = list(
+            movie_database
+        )
 
-    # Always write the complete local snapshot first.
+    # Local save happens immediately so the current process never
+    # depends on GitHub being reachable.
     save_json(
         MOVIE_DB_FILE,
         snapshot,
     )
 
-    # GitHub is the durable store on Render because the normal Render
-    # filesystem may be reset on redeploy/restart.  Do the backup now
-    # instead of relying on a daemon thread that can be interrupted.
-    if github_enabled():
-        try:
-            remote_movies, _ = github_get_movies()
-            remote_movies = (
-                remote_movies
-                if isinstance(remote_movies, list)
-                else []
-            )
-
-            # The current snapshot is authoritative for records that
-            # have the same stable movie identity.  Keep older remote
-            # records that are not present locally.
-            merged = merge_movie_lists(
-                snapshot,
-                remote_movies,
-            )
-
-            if not github_put_movies(merged):
-                print(
-                    "WARNING: Movie saved locally, but GitHub backup failed."
-                )
-
-        except Exception:
-            print(
-                "GitHub movie backup error:"
-            )
-            print(
-                traceback.format_exc()
-            )
+    # Durable backup happens in the background so a Telegram channel
+    # post is not delayed by GitHub network latency.
+    github_background_save(snapshot)
 
 
 def load_ai_usage():
@@ -4302,6 +4271,16 @@ async def main():
             "BOT_TOKEN is missing"
         )
 
+    # Start the HTTP health server immediately. Render expects the
+    # service port to be listening while the Telegram API startup
+    # calls are still running. Starting it first prevents Render from
+    # treating a slow Telegram/network startup as an early exit.
+    threading.Thread(
+        target=start_health_server,
+        daemon=True,
+        name="movie-http-server",
+    ).start()
+
     application = (
         Application
         .builder()
@@ -4463,16 +4442,6 @@ async def main():
                 "menu web app setup skipped:",
                 e,
             )
-
-    # --------------------------------------------------------
-    # HEALTH SERVER
-    # --------------------------------------------------------
-
-    threading.Thread(
-        target=start_health_server,
-        daemon=True,
-        name="movie-http-server",
-    ).start()
 
     # --------------------------------------------------------
     # WEBHOOK

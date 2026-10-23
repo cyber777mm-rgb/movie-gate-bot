@@ -1,22 +1,20 @@
 # Movie Myanmar - single-file bot + embedded Mini App
-# Gate + Telegram Mini App Auth + Loading/Wake Recovery
 
 import os
 import asyncio
 import base64
 import hashlib
-import hmac
 import json
 import threading
 import re
 import traceback
 import html
+import hmac
 import time
 from difflib import SequenceMatcher
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs, parse_qsl, urlencode
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
 
 from google import genai
 
@@ -52,8 +50,13 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 MAIN_CHANNEL = "@moviemyanmar567"
+MAIN_CHANNEL_URL = "https://t.me/moviemyanmar567"
 MOVIE_CHANNEL_URL = "https://t.me/+7EGkZEWlzfAyNGM1"
 
+# Private channel used as the actual Movie Storage Channel.
+# If left empty, the bot will automatically accept channel posts
+# from channels that have no public username (private channels),
+# while ignoring the public MAIN_CHANNEL.
 MOVIE_STORAGE_CHAT_ID = os.getenv(
     "MOVIE_STORAGE_CHAT_ID",
     "",
@@ -67,7 +70,12 @@ ADMIN_CHAT_ID = os.getenv(
     "8072749262",
 ).strip()
 
-PORT = int(os.getenv("PORT", "10000"))
+PORT = int(
+    os.getenv(
+        "PORT",
+        "10000",
+    )
+)
 
 WEBHOOK_SECRET = hashlib.sha256(
     BOT_TOKEN.encode("utf-8")
@@ -86,15 +94,6 @@ WELCOME_IMAGE = (
     "ChatGPT%20Image%20Oct%2018%2C%202026%2C%2007_47_33%20PM.png"
 )
 
-# Telegram Mini App initData should not be kept valid forever.
-# This is only an anti-replay protection; membership is checked
-# separately on every protected API request.
-WEBAPP_AUTH_MAX_AGE = 24 * 60 * 60
-
-# How many times the Mini App retries while Render wakes up.
-MINI_APP_RETRIES = 8
-MINI_APP_RETRY_DELAY = 1500
-
 
 # ============================================================
 # PERSISTENT DATA DIRECTORY
@@ -111,6 +110,7 @@ try:
         exist_ok=True,
     )
     DATA_DIR = REQUESTED_DATA_DIR
+
 except Exception:
     DATA_DIR = os.path.abspath("./data")
     os.makedirs(
@@ -130,20 +130,20 @@ AI_USAGE_FILE = os.path.join(
     "ai_usage.json",
 )
 
+# Automatically learned private Movie Storage Channel ID.
+# MOVIE_STORAGE_CHAT_ID from Render always takes precedence.
 STORAGE_CHANNEL_FILE = os.path.join(
     DATA_DIR,
     "storage_channel.json",
 )
 
+# Admin movie uploader state.
+# video -> poster -> caption -> preview -> publish
 uploader_sessions = {}
 album_buffers = {}
 album_tasks = {}
 published_album_ids = set()
 
-
-# ============================================================
-# STORAGE CHANNEL
-# ============================================================
 
 def load_storage_channel_id():
     if MOVIE_STORAGE_CHAT_ID:
@@ -157,17 +157,16 @@ def load_storage_channel_id():
         ) as f:
             data = json.load(f)
 
-        return str(
+        chat_id = str(
             data.get("chat_id", "")
         ).strip()
-
+        return chat_id
     except Exception:
         return ""
 
 
 def save_storage_channel_id(chat_id):
     chat_id = str(chat_id or "").strip()
-
     if not chat_id or MOVIE_STORAGE_CHAT_ID:
         return
 
@@ -184,10 +183,7 @@ def save_storage_channel_id(chat_id):
                 indent=2,
             )
     except Exception as e:
-        print(
-            "Storage channel save error:",
-            e,
-        )
+        print("Storage channel save error:", e)
 
 
 AUTO_STORAGE_CHAT_ID = load_storage_channel_id()
@@ -230,35 +226,29 @@ def uploader_keyboard():
 
 
 # ============================================================
-# GITHUB MOVIE BACKUP
+# GITHUB MOVIE BACKUP / PERSISTENT STORAGE
 # ============================================================
-
-GITHUB_TOKEN = os.getenv(
-    "GITHUB_TOKEN",
-    "",
-).strip()
-
+# Render's local filesystem may be reset on redeploy/restart.
+# Movie data is therefore backed up to a GitHub repository when
+# these environment variables are configured on Render.
+#
+# IMPORTANT: Keep the repository PRIVATE if movie records contain
+# private Telegram storage links/file IDs.
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 GITHUB_REPO = os.getenv(
     "GITHUB_REPO",
     "cyber777mm-rgb/movie-myanmar-data",
 ).strip().strip("/")
-
 GITHUB_MOVIE_FILE = os.getenv(
     "GITHUB_MOVIE_FILE",
     "movies.json",
 ).strip().lstrip("/")
-
 GITHUB_BRANCH = os.getenv(
     "GITHUB_BRANCH",
     "main",
 ).strip() or "main"
 
-LEGACY_GITHUB_REPO = (
-    "cyber777mm-rgb/movie-gate-bot"
-)
-
 GITHUB_API_BASE = "https://api.github.com"
-
 github_sync_lock = threading.RLock()
 
 
@@ -267,222 +257,136 @@ def github_headers():
         "Accept": "application/vnd.github+json",
         "User-Agent": "movie-myanmar-bot",
     }
-
     if GITHUB_TOKEN:
-        headers["Authorization"] = (
-            f"Bearer {GITHUB_TOKEN}"
-        )
-
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
     return headers
 
 
 def github_enabled():
-    return bool(
-        GITHUB_TOKEN
-        and GITHUB_REPO
-        and GITHUB_MOVIE_FILE
-    )
-
-
-def github_get_movies_from_repo(repo):
-    if not (
-        GITHUB_TOKEN
-        and repo
-        and GITHUB_MOVIE_FILE
-    ):
-        return [], None
-
-    url = (
-        f"{GITHUB_API_BASE}/repos/{repo}/contents/"
-        f"{GITHUB_MOVIE_FILE}?ref={GITHUB_BRANCH}"
-    )
-
-    req = Request(
-        url,
-        headers=github_headers(),
-        method="GET",
-    )
-
-    with urlopen(
-        req,
-        timeout=10,
-    ) as response:
-
-        payload = json.loads(
-            response.read().decode(
-                "utf-8"
-            )
-        )
-
-    encoded = payload.get(
-        "content",
-        "",
-    ).replace("\n", "")
-
-    if not encoded:
-        return [], payload.get("sha")
-
-    raw = base64.b64decode(
-        encoded
-    ).decode("utf-8")
-
-    data = json.loads(raw)
-
-    if not isinstance(data, list):
-        data = []
-
-    return data, payload.get("sha")
+    return bool(GITHUB_TOKEN and GITHUB_REPO and GITHUB_MOVIE_FILE)
 
 
 def github_get_movies():
+    """Return (movies, sha) from the GitHub Contents API."""
     if not github_enabled():
         return [], None
 
-    repos = [GITHUB_REPO]
-
-    if LEGACY_GITHUB_REPO not in repos:
-        repos.append(
-            LEGACY_GITHUB_REPO
-        )
-
-    errors = []
-
-    for repo in repos:
-        try:
-            movies, sha = (
-                github_get_movies_from_repo(
-                    repo
-                )
-            )
-
-            if isinstance(
-                movies,
-                list,
-            ):
-                print(
-                    "GitHub movie load OK:",
-                    len(movies),
-                    "movies from",
-                    repo,
-                )
-
-                return movies, sha
-
-        except Exception as e:
-            errors.append(
-                f"{repo}: {e}"
-            )
-
-    print(
-        "GitHub movie load failed:",
-        " | ".join(errors)
-        if errors
-        else "no repositories",
+    url = (
+        f"{GITHUB_API_BASE}/repos/{GITHUB_REPO}/contents/"
+        f"{GITHUB_MOVIE_FILE}?ref={GITHUB_BRANCH}"
     )
 
-    return [], None
+    try:
+        req = Request(
+            url,
+            headers=github_headers(),
+            method="GET",
+        )
+        with urlopen(req, timeout=10) as response:
+            payload = json.loads(
+                response.read().decode("utf-8")
+            )
+
+        encoded = payload.get("content", "")
+        encoded = encoded.replace("\n", "")
+        raw = base64.b64decode(encoded).decode("utf-8")
+        data = json.loads(raw)
+
+        if not isinstance(data, list):
+            data = []
+
+        return data, payload.get("sha")
+
+    except Exception as e:
+        # 404 simply means the backup file does not exist yet.
+        print("GitHub movie load skipped/error:", e)
+        return [], None
 
 
 def github_put_movies(movies):
+    """Create/update the GitHub movie JSON file."""
     if not github_enabled():
         return False
 
     with github_sync_lock:
+        try:
+            # Fetch the latest SHA immediately before writing so that
+            # repeated channel posts do not use a stale SHA.
+            _, sha = github_get_movies()
 
-        repos = [GITHUB_REPO]
-
-        if LEGACY_GITHUB_REPO not in repos:
-            repos.append(
-                LEGACY_GITHUB_REPO
-            )
-
-        payload_text = (
-            json.dumps(
+            payload_text = json.dumps(
                 movies,
                 ensure_ascii=False,
                 indent=2,
+            ) + "\n"
+
+            encoded = base64.b64encode(
+                payload_text.encode("utf-8")
+            ).decode("ascii")
+
+            url = (
+                f"{GITHUB_API_BASE}/repos/{GITHUB_REPO}/contents/"
+                f"{GITHUB_MOVIE_FILE}"
             )
-            + "\n"
-        )
 
-        encoded = base64.b64encode(
-            payload_text.encode(
-                "utf-8"
+            body = {
+                "message": "Update Movie Myanmar movie database",
+                "content": encoded,
+                "branch": GITHUB_BRANCH,
+            }
+
+            if sha:
+                body["sha"] = sha
+
+            req = Request(
+                url,
+                data=json.dumps(body).encode("utf-8"),
+                headers={
+                    **github_headers(),
+                    "Content-Type": "application/json",
+                },
+                method="PUT",
             )
-        ).decode("ascii")
 
-        last_error = None
+            with urlopen(req, timeout=15) as response:
+                response.read()
 
-        for repo in repos:
+            print(
+                "GitHub movie backup saved:",
+                len(movies),
+                "movies",
+            )
+            return True
 
-            try:
-                _, sha = (
-                    github_get_movies_from_repo(
-                        repo
-                    )
-                )
+        except Exception as e:
+            print("GitHub movie backup error:", e)
+            return False
 
-                url = (
-                    f"{GITHUB_API_BASE}/repos/"
-                    f"{repo}/contents/"
-                    f"{GITHUB_MOVIE_FILE}"
-                )
 
-                body = {
-                    "message": (
-                        "Update Movie Myanmar "
-                        "movie database"
-                    ),
-                    "content": encoded,
-                    "branch": GITHUB_BRANCH,
-                }
+def github_background_save(snapshot):
+    """Save movie data without blocking Telegram update handling."""
+    if not github_enabled():
+        return
 
-                if sha:
-                    body["sha"] = sha
+    def worker():
+        try:
+            # Merge with whatever is currently in GitHub so an older
+            # background worker can never intentionally erase newer data.
+            remote_movies, _ = github_get_movies()
+            merged = merge_movie_lists(
+                remote_movies if isinstance(remote_movies, list) else [],
+                snapshot if isinstance(snapshot, list) else [],
+            )
+            github_put_movies(merged)
+        except Exception:
+            print("GitHub background save error:")
+            print(traceback.format_exc())
 
-                req = Request(
-                    url,
-                    data=json.dumps(
-                        body
-                    ).encode("utf-8"),
-                    headers={
-                        **github_headers(),
-                        "Content-Type":
-                            "application/json",
-                    },
-                    method="PUT",
-                )
-
-                with urlopen(
-                    req,
-                    timeout=15,
-                ) as response:
-                    response.read()
-
-                print(
-                    "GitHub movie backup saved:",
-                    len(movies),
-                    "movies to",
-                    repo,
-                )
-
-                return True
-
-            except Exception as e:
-                last_error = e
-
-                print(
-                    "GitHub backup repo failed:",
-                    repo,
-                    e,
-                )
-
-        print(
-            "GitHub movie backup failed:",
-            last_error,
-        )
-
-        return False
+    threading.Thread(
+        target=worker,
+        daemon=True,
+        name="github-movie-backup",
+    ).start()
 
 
 # ============================================================
@@ -540,6 +444,7 @@ GENRE_KEYWORDS = {
     ],
 }
 
+
 CHANNEL_REQUEST_WORDS = [
     "channel link",
     "channel",
@@ -549,6 +454,7 @@ CHANNEL_REQUEST_WORDS = [
     "channel ပေး",
     "channel ပး",
 ]
+
 
 MOVIE_INTENT_WORDS = [
     "movie",
@@ -563,7 +469,7 @@ MOVIE_INTENT_WORDS = [
 
 
 # ============================================================
-# CAROUSEL
+# CAROUSEL / CACHE
 # ============================================================
 
 CAROUSEL_LIMIT = 5
@@ -616,18 +522,14 @@ def save_json(path, data):
             "w",
             encoding="utf-8",
         ) as f:
-
             json.dump(
                 data,
                 f,
                 ensure_ascii=False,
                 indent=2,
             )
-
             f.flush()
-            os.fsync(
-                f.fileno()
-            )
+            os.fsync(f.fileno())
 
         os.replace(
             temp_path,
@@ -635,7 +537,6 @@ def save_json(path, data):
         )
 
     except Exception as e:
-
         print(
             "save error:",
             path,
@@ -643,14 +544,185 @@ def save_json(path, data):
         )
 
         try:
-            if os.path.exists(
-                temp_path
-            ):
-                os.remove(
-                    temp_path
-                )
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
         except Exception:
             pass
+
+
+# ============================================================
+# OLD DATA MIGRATION
+# ============================================================
+
+def merge_movie_lists(primary, secondary):
+    """
+    Merge two movie lists without duplicating stable records.
+    Primary records win when the same ID exists.
+    """
+
+    result = []
+    seen = set()
+
+    for source in (
+        primary,
+        secondary,
+    ):
+        if not isinstance(source, list):
+            continue
+
+        for movie in source:
+            if not isinstance(movie, dict):
+                continue
+
+            ensure_movie_id(movie)
+
+            movie_id = str(
+                movie.get(
+                    "id",
+                    "",
+                )
+            )
+
+            if movie_id in seen:
+                continue
+
+            seen.add(movie_id)
+            result.append(movie)
+
+    return result
+
+
+def migrate_old_data():
+    old_movie_file = os.path.abspath(
+        "movies.json"
+    )
+
+    old_ai_file = os.path.abspath(
+        "ai_usage.json"
+    )
+
+    current_movie_file = os.path.abspath(
+        MOVIE_DB_FILE
+    )
+
+    current_ai_file = os.path.abspath(
+        AI_USAGE_FILE
+    )
+
+    # --------------------------------------------------------
+    # MOVIES
+    # --------------------------------------------------------
+
+    if old_movie_file != current_movie_file:
+        try:
+            old_exists = os.path.exists(
+                old_movie_file
+            )
+
+            new_exists = os.path.exists(
+                MOVIE_DB_FILE
+            )
+
+            if old_exists:
+                old_movies = load_json(
+                    old_movie_file,
+                    [],
+                )
+
+                new_movies = (
+                    load_json(
+                        MOVIE_DB_FILE,
+                        [],
+                    )
+                    if new_exists
+                    else []
+                )
+
+                if isinstance(
+                    old_movies,
+                    list,
+                ):
+                    if isinstance(
+                        new_movies,
+                        list,
+                    ):
+                        merged = merge_movie_lists(
+                            new_movies,
+                            old_movies,
+                        )
+                    else:
+                        merged = old_movies
+
+                    if merged:
+                        save_json(
+                            MOVIE_DB_FILE,
+                            merged,
+                        )
+
+                        print(
+                            "Movie data migration/merge:",
+                            len(merged),
+                        )
+
+        except Exception:
+            print(
+                "Movie migration error:"
+            )
+            print(
+                traceback.format_exc()
+            )
+
+    # --------------------------------------------------------
+    # AI USAGE
+    # --------------------------------------------------------
+
+    if old_ai_file != current_ai_file:
+        try:
+            if os.path.exists(
+                old_ai_file
+            ):
+                old_usage = load_json(
+                    old_ai_file,
+                    {},
+                )
+
+                new_usage = load_json(
+                    AI_USAGE_FILE,
+                    {},
+                )
+
+                if not isinstance(
+                    old_usage,
+                    dict,
+                ):
+                    old_usage = {}
+
+                if not isinstance(
+                    new_usage,
+                    dict,
+                ):
+                    new_usage = {}
+
+                merged_usage = dict(
+                    old_usage
+                )
+
+                for key, value in new_usage.items():
+                    merged_usage[key] = value
+
+                if merged_usage:
+                    save_json(
+                        AI_USAGE_FILE,
+                        merged_usage,
+                    )
+
+        except Exception:
+            print(
+                "AI usage migration error:"
+            )
+            print(
+                traceback.format_exc()
+            )
 
 
 # ============================================================
@@ -692,11 +764,9 @@ def ensure_movie_id(movie):
     )
 
     if chat_id and message_id:
-        movie["id"] = (
-            generate_movie_id(
-                chat_id,
-                message_id,
-            )
+        movie["id"] = generate_movie_id(
+            chat_id,
+            message_id,
         )
 
     else:
@@ -713,198 +783,11 @@ def ensure_movie_id(movie):
     return movie["id"]
 
 
-def merge_movie_lists(
-    primary,
-    secondary,
-):
-    """
-    Merge movie databases by stable identity.
-    Primary wins for duplicate records.
-    """
-
-    result = []
-    seen = set()
-
-    for source in (
-        primary,
-        secondary,
-    ):
-
-        if not isinstance(
-            source,
-            list,
-        ):
-            continue
-
-        for movie in source:
-
-            if not isinstance(
-                movie,
-                dict,
-            ):
-                continue
-
-            ensure_movie_id(movie)
-
-            movie_id = str(
-                movie.get(
-                    "id",
-                    "",
-                )
-            )
-
-            if movie_id in seen:
-                continue
-
-            seen.add(
-                movie_id
-            )
-
-            result.append(
-                movie
-            )
-
-    return result
-
-
-# ============================================================
-# OLD DATA MIGRATION
-# ============================================================
-
-def migrate_old_data():
-
-    old_movie_file = os.path.abspath(
-        "movies.json"
-    )
-
-    old_ai_file = os.path.abspath(
-        "ai_usage.json"
-    )
-
-    current_movie_file = os.path.abspath(
-        MOVIE_DB_FILE
-    )
-
-    current_ai_file = os.path.abspath(
-        AI_USAGE_FILE
-    )
-
-    if old_movie_file != current_movie_file:
-
-        try:
-            if os.path.exists(
-                old_movie_file
-            ):
-
-                old_movies = load_json(
-                    old_movie_file,
-                    [],
-                )
-
-                new_movies = load_json(
-                    MOVIE_DB_FILE,
-                    [],
-                )
-
-                if (
-                    isinstance(
-                        old_movies,
-                        list,
-                    )
-                    and isinstance(
-                        new_movies,
-                        list,
-                    )
-                ):
-
-                    merged = merge_movie_lists(
-                        new_movies,
-                        old_movies,
-                    )
-
-                    if merged:
-                        save_json(
-                            MOVIE_DB_FILE,
-                            merged,
-                        )
-
-                        print(
-                            "Movie data migration:",
-                            len(merged),
-                        )
-
-        except Exception:
-            print(
-                "Movie migration error:"
-            )
-            print(
-                traceback.format_exc()
-            )
-
-    if old_ai_file != current_ai_file:
-
-        try:
-            if os.path.exists(
-                old_ai_file
-            ):
-
-                old_usage = load_json(
-                    old_ai_file,
-                    {},
-                )
-
-                new_usage = load_json(
-                    AI_USAGE_FILE,
-                    {},
-                )
-
-                if not isinstance(
-                    old_usage,
-                    dict,
-                ):
-                    old_usage = {}
-
-                if not isinstance(
-                    new_usage,
-                    dict,
-                ):
-                    new_usage = {}
-
-                merged_usage = dict(
-                    old_usage
-                )
-
-                merged_usage.update(
-                    new_usage
-                )
-
-                if merged_usage:
-                    save_json(
-                        AI_USAGE_FILE,
-                        merged_usage,
-                    )
-
-        except Exception:
-            print(
-                "AI usage migration error:"
-            )
-            print(
-                traceback.format_exc()
-            )
-
-
-# ============================================================
-# NORMALIZE DATABASE
-# ============================================================
-
 def normalize_movie_database():
-
     changed = False
 
     with movie_lock:
-
         for movie in movie_database:
-
             if not isinstance(
                 movie,
                 dict,
@@ -915,9 +798,7 @@ def normalize_movie_database():
                 "id"
             )
 
-            ensure_movie_id(
-                movie
-            )
+            ensure_movie_id(movie)
 
             if movie.get(
                 "id"
@@ -925,9 +806,7 @@ def normalize_movie_database():
                 changed = True
 
             if not isinstance(
-                movie.get(
-                    "genres"
-                ),
+                movie.get("genres"),
                 list,
             ):
                 movie["genres"] = []
@@ -946,18 +825,16 @@ def normalize_movie_database():
                     )
                     or ""
                 )
-
                 changed = True
 
     return changed
 
 
 # ============================================================
-# MOVIE DATABASE LOAD
+# MOVIE DATABASE
 # ============================================================
 
 def load_movies():
-
     global movie_database
 
     local_movies = load_json(
@@ -965,57 +842,30 @@ def load_movies():
         [],
     )
 
-    if not isinstance(
-        local_movies,
-        list,
-    ):
+    if not isinstance(local_movies, list):
         local_movies = []
 
+    # Load the durable GitHub copy when configured, then merge both
+    # sources. This is what keeps existing movies alive after a
+    # Render restart/redeploy. Local records win on duplicate IDs.
     remote_movies = []
-
     if github_enabled():
-
-        try:
-            remote_movies, _ = (
-                github_get_movies()
-            )
-
-            if not isinstance(
-                remote_movies,
-                list,
-            ):
-                remote_movies = []
-
-        except Exception:
+        remote_movies, _ = github_get_movies()
+        if not isinstance(remote_movies, list):
             remote_movies = []
 
-    # IMPORTANT:
-    # Never replace valid local records with an empty GitHub response.
-    if remote_movies:
+    movie_database = merge_movie_lists(
+        remote_movies,
+        local_movies,
+    )
 
-        movie_database = merge_movie_lists(
-            remote_movies,
-            local_movies,
-        )
+    changed = normalize_movie_database()
 
-    elif local_movies:
-
-        movie_database = merge_movie_lists(
-            local_movies,
-            [],
-        )
-
-    else:
-
-        movie_database = []
-
-    normalize_movie_database()
-
+    # Always write the merged result locally. If GitHub is enabled,
+    # also refresh the durable copy so both sides contain the same
+    # complete movie list.
     with movie_lock:
-        snapshot = [
-            dict(movie)
-            for movie in movie_database
-        ]
+        snapshot = list(movie_database)
 
     save_json(
         MOVIE_DB_FILE,
@@ -1023,102 +873,51 @@ def load_movies():
     )
 
     # IMPORTANT:
-    # No GitHub write here.
-    # Startup/restart must never create a blank GitHub backup.
+    # Do not write to GitHub during startup. The deploy repository
+    # must never be updated just because Render restarted the bot.
+    # Movie changes are backed up only by save_movies() after an
+    # actual movie is added/updated.
 
     print(
         "Loaded movies:",
         len(movie_database),
         "from",
         MOVIE_DB_FILE,
-        "GitHub:",
+        "GitHub backup:",
         "ON" if github_enabled() else "OFF",
     )
 
-    if github_enabled() and not remote_movies:
-
-        print(
-            "GitHub returned no records; "
-            "local movies preserved:",
-            len(local_movies),
-        )
-
 
 def save_movies():
-
     with movie_lock:
+        snapshot = list(
+            movie_database
+        )
 
-        snapshot = [
-            dict(movie)
-            for movie in movie_database
-            if isinstance(
-                movie,
-                dict,
-            )
-        ]
-
+    # Local save happens immediately so the current process never
+    # depends on GitHub being reachable.
     save_json(
         MOVIE_DB_FILE,
         snapshot,
     )
 
-    if not github_enabled():
-        return
+    # Durable backup happens in the background so a Telegram channel
+    # post is not delayed by GitHub network latency.
+    github_background_save(snapshot)
 
-    try:
-
-        remote_movies, _ = (
-            github_get_movies()
-        )
-
-        if not isinstance(
-            remote_movies,
-            list,
-        ):
-            remote_movies = []
-
-        merged = merge_movie_lists(
-            snapshot,
-            remote_movies,
-        )
-
-        if not github_put_movies(
-            merged
-        ):
-
-            print(
-                "WARNING: Local movie save OK, "
-                "GitHub backup failed."
-            )
-
-    except Exception:
-
-        print(
-            "GitHub movie backup error:"
-        )
-
-        print(
-            traceback.format_exc()
-        )
-
-
-# ============================================================
-# AI USAGE
-# ============================================================
 
 def load_ai_usage():
-
     global ai_usage
 
-    data = load_json(
+    x = load_json(
         AI_USAGE_FILE,
         {},
     )
 
     ai_usage = (
-        data
+        x
         if isinstance(
-            data,
+            x,
             dict,
         )
         else {}
@@ -1131,7 +930,6 @@ def load_ai_usage():
 
 
 def save_ai_usage():
-
     with ai_lock:
         snapshot = dict(
             ai_usage
@@ -1144,9 +942,7 @@ def save_ai_usage():
 
 
 def get_ai_usage(uid):
-
     with ai_lock:
-
         try:
             return int(
                 ai_usage.get(
@@ -1154,15 +950,12 @@ def get_ai_usage(uid):
                     0,
                 )
             )
-
         except Exception:
             return 0
 
 
 def increase_ai_usage(uid):
-
     with ai_lock:
-
         ai_usage[str(uid)] = (
             get_ai_usage(uid) + 1
         )
@@ -1182,9 +975,7 @@ load_ai_usage()
 gemini_client = None
 
 if GEMINI_API_KEY:
-
     try:
-
         gemini_client = genai.Client(
             api_key=GEMINI_API_KEY
         )
@@ -1195,7 +986,6 @@ if GEMINI_API_KEY:
         )
 
     except Exception as e:
-
         print(
             "Gemini init error:",
             e,
@@ -1207,7 +997,6 @@ if GEMINI_API_KEY:
 # ============================================================
 
 def normalize_text(s):
-
     s = (
         s or ""
     ).lower()
@@ -1227,7 +1016,6 @@ def normalize_text(s):
 
 
 def extract_year(s):
-
     m = re.search(
         r"\b(19\d{2}|20\d{2})\b",
         s or "",
@@ -1241,7 +1029,6 @@ def extract_year(s):
 
 
 def detect_genres(s):
-
     n = normalize_text(s)
 
     return [
@@ -1257,11 +1044,10 @@ def detect_genres(s):
 
 
 # ============================================================
-# MOVIE PARSER
+# MOVIE POST PARSER
 # ============================================================
 
 def parse_movie_post(message):
-
     text = (
         message.caption
         or message.text
@@ -1280,9 +1066,7 @@ def parse_movie_post(message):
         else "Untitled Movie"
     )
 
-    year = extract_year(
-        text
-    )
+    year = extract_year(text)
 
     quality_match = re.search(
         r"\b(2160p|4k|1080p|720p|480p)\b",
@@ -1316,9 +1100,7 @@ def parse_movie_post(message):
             else ""
         ),
         "original_name": title,
-        "genres": detect_genres(
-            text
-        ),
+        "genres": detect_genres(text),
         "description": text,
         "post_link": "",
         "chat_id": str(
@@ -1341,7 +1123,6 @@ def parse_movie_post(message):
 # ============================================================
 
 def build_movie_link(movie):
-
     post_link = str(
         movie.get(
             "post_link",
@@ -1368,7 +1149,6 @@ def build_movie_link(movie):
         chat.startswith("-100")
         and mid
     ):
-
         return (
             f"https://t.me/c/"
             f"{chat[4:]}/{mid}"
@@ -1378,43 +1158,34 @@ def build_movie_link(movie):
 
 
 # ============================================================
-# LOOKUP
+# MOVIE LOOKUP
 # ============================================================
 
 def find_movie_by_id(movie_id):
-
     movie_id = str(
         movie_id
     )
 
     with movie_lock:
-
         for movie in movie_database:
-
             if str(
                 movie.get(
                     "id",
                     "",
                 )
             ) == movie_id:
-
                 return movie
 
     return None
 
 
 def movie_search(q):
-
-    qn = normalize_text(
-        q
-    )
+    qn = normalize_text(q)
 
     if not qn:
         return []
 
-    year = extract_year(
-        q
-    )
+    year = extract_year(q)
 
     scored = []
 
@@ -1424,7 +1195,6 @@ def movie_search(q):
         )
 
     for movie in movies:
-
         hay = normalize_text(
             " ".join(
                 [
@@ -1496,7 +1266,6 @@ def movie_search(q):
         )
 
         if score >= 25:
-
             scored.append(
                 (
                     score,
@@ -1516,9 +1285,7 @@ def movie_search(q):
 
 
 def latest(limit=10):
-
     with movie_lock:
-
         return list(
             reversed(
                 movie_database[
@@ -1533,7 +1300,6 @@ def latest(limit=10):
 # ============================================================
 
 def invalidate_carousel():
-
     carousel_gif_cache.update(
         signature=None,
         bytes=None,
@@ -1547,13 +1313,12 @@ def invalidate_carousel():
 # ============================================================
 
 def join_keyboard():
-
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
                     "🎬 Join Movie Myanmar",
-                    url=MOVIE_CHANNEL_URL,
+                    url=MAIN_CHANNEL_URL,
                 )
             ],
             [
@@ -1567,7 +1332,6 @@ def join_keyboard():
 
 
 def home_keyboard():
-
     rows = [
         [
             InlineKeyboardButton(
@@ -1608,7 +1372,6 @@ def home_keyboard():
     ]
 
     if WebAppInfo:
-
         rows.insert(
             0,
             [
@@ -1630,7 +1393,6 @@ def home_keyboard():
 
 
 def category_keyboard():
-
     genres = list(
         GENRE_KEYWORDS.keys()
     )
@@ -1649,7 +1411,6 @@ def category_keyboard():
         len(genres),
         2,
     ):
-
         row = [
             InlineKeyboardButton(
                 genres[i],
@@ -1661,7 +1422,6 @@ def category_keyboard():
         ]
 
         if i + 1 < len(genres):
-
             row.append(
                 InlineKeyboardButton(
                     genres[i + 1],
@@ -1672,9 +1432,7 @@ def category_keyboard():
                 )
             )
 
-        rows.append(
-            row
-        )
+        rows.append(row)
 
     rows.append(
         [
@@ -1695,7 +1453,6 @@ def category_keyboard():
 # ============================================================
 
 def home_caption():
-
     return (
         "🎬 <b>Movie Myanmar</b>\n\n"
         "ဟေး 😝 Xiao Yu CyB ပါ။\n"
@@ -1710,33 +1467,205 @@ def home_caption():
 # ============================================================
 
 async def is_member(bot, uid):
+    # Admin is always allowed, even without joining the public gate channel.
+    if is_admin_user(uid):
+        return True
 
     try:
-
         status = await bot.get_chat_member(
             MAIN_CHANNEL,
             uid,
         )
 
-        return status.status in (
+        if status.status in (
             "member",
             "administrator",
             "creator",
-            "restricted",
-        )
+        ):
+            return True
+
+        # Telegram can return restricted users. Only count them as joined
+        # when Telegram explicitly says they are still a member.
+        if status.status == "restricted":
+            return bool(
+                getattr(status, "is_member", False)
+            )
+
+        return False
 
     except Exception as e:
-
         print(
             "membership check error:",
             e,
         )
-
         return False
 
 
-async def stop_carousel(chat_id):
+def telegram_get_chat_member_sync(uid):
+    """Synchronous Telegram membership lookup for the HTTP Mini App server."""
+    if is_admin_user(uid):
+        return True
 
+    if not BOT_TOKEN:
+        return False
+
+    try:
+        query = urlencode(
+            {
+                "chat_id": MAIN_CHANNEL,
+                "user_id": str(uid),
+            }
+        )
+
+        request = Request(
+            "https://api.telegram.org/bot"
+            + BOT_TOKEN
+            + "/getChatMember?"
+            + query,
+            headers={
+                "User-Agent": "Movie-Myanmar-Mini-App",
+            },
+        )
+
+        with urlopen(request, timeout=8) as response:
+            payload = json.loads(
+                response.read().decode("utf-8")
+            )
+
+        if not payload.get("ok"):
+            return False
+
+        member = payload.get("result") or {}
+        member_status = member.get("status", "")
+
+        if member_status in (
+            "member",
+            "administrator",
+            "creator",
+        ):
+            return True
+
+        if member_status == "restricted":
+            return bool(member.get("is_member", False))
+
+        return False
+
+    except Exception as e:
+        print(
+            "sync membership check error:",
+            e,
+        )
+        return False
+
+
+def validate_telegram_webapp_init_data(init_data):
+    """Validate Telegram Web App initData and return the real user ID."""
+    if not init_data or not BOT_TOKEN:
+        return None
+
+    try:
+        pairs = parse_qsl(
+            init_data,
+            keep_blank_values=True,
+        )
+
+        data = dict(pairs)
+        received_hash = data.pop("hash", "")
+
+        if not received_hash:
+            return None
+
+        data_check_string = "\n".join(
+            f"{key}={value}"
+            for key, value in sorted(data.items())
+        )
+
+        secret_key = hmac.new(
+            b"WebAppData",
+            BOT_TOKEN.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+
+        expected_hash = hmac.new(
+            secret_key,
+            data_check_string.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+        if not hmac.compare_digest(
+            expected_hash,
+            received_hash,
+        ):
+            return None
+
+        auth_date = int(
+            data.get("auth_date", "0") or 0
+        )
+
+        # Do not accept an ancient/replayed Mini App session.
+        if not auth_date or (time.time() - auth_date) > 86400:
+            return None
+
+        user_data = json.loads(
+            data.get("user", "{}")
+        )
+
+        uid = int(
+            user_data.get("id", 0) or 0
+        )
+
+        return uid or None
+
+    except Exception as e:
+        print(
+            "WebApp initData validation error:",
+            e,
+        )
+        return None
+
+
+def get_webapp_init_data(headers, qs):
+    raw = str(
+        headers.get(
+            "X-Telegram-Init-Data",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if raw:
+        return raw
+
+    # Poster <img src> requests cannot attach custom headers, so the
+    # Mini App sends initData as an encoded query parameter only there.
+    values = qs.get("initData", [])
+    if values:
+        return str(values[0] or "").strip()
+
+    return ""
+
+
+def authorize_webapp_request(headers, qs):
+    raw = get_webapp_init_data(
+        headers,
+        qs,
+    )
+
+    uid = validate_telegram_webapp_init_data(raw)
+
+    if not uid:
+        return False, None, "invalid_init_data"
+
+    if is_admin_user(uid):
+        return True, uid, "admin"
+
+    if not telegram_get_chat_member_sync(uid):
+        return False, uid, "not_member"
+
+    return True, uid, "ok"
+
+
+async def stop_carousel(chat_id):
     carousel_message_ids.pop(
         chat_id,
         None,
@@ -1744,18 +1673,16 @@ async def stop_carousel(chat_id):
 
 
 # ============================================================
-# HOME
+# HOME COMMAND
 # ============================================================
 
 async def show_home(
     update,
     context,
 ):
-
     query = update.callback_query
 
     if query:
-
         try:
             await query.answer()
         except Exception:
@@ -1768,7 +1695,6 @@ async def show_home(
     )
 
     try:
-
         await target.reply_photo(
             WELCOME_IMAGE,
             caption=home_caption(),
@@ -1777,7 +1703,6 @@ async def show_home(
         )
 
     except Exception:
-
         await target.reply_text(
             home_caption(),
             parse_mode="HTML",
@@ -1789,20 +1714,17 @@ async def start_command(
     update,
     context,
 ):
-
     uid = update.effective_user.id
 
     if not await is_member(
         context.bot,
         uid,
     ):
-
         await update.effective_message.reply_text(
             "🎬 Movie Myanmar ထဲဝင်ပြီးမှ "
             "သုံးလို့ရမယ်နော် 😝",
             reply_markup=join_keyboard(),
         )
-
         return
 
     user_search_mode.pop(
@@ -1825,29 +1747,24 @@ async def check_join(
     update,
     context,
 ):
-
     query = update.callback_query
 
     if await is_member(
         context.bot,
         query.from_user.id,
     ):
+        await query.answer("✅ Joined!", show_alert=False)
 
-        await query.answer()
-
+        # Remove the join prompt and immediately open the Home screen.
         try:
-
-            await query.edit_message_text(
-                "✅ ဝင်ပြီးပြီဟေ့ 😝 "
-                "ခဏ... Movie Myanmar ဖွင့်ပေးမယ်။"
-            )
-
+            await query.message.delete()
         except Exception:
-            pass
-
-        await asyncio.sleep(
-            0.8
-        )
+            try:
+                await query.edit_message_text(
+                    "✅ ဝင်ပြီးပြီ 😝"
+                )
+            except Exception:
+                pass
 
         await show_home(
             update,
@@ -1855,7 +1772,6 @@ async def check_join(
         )
 
     else:
-
         await query.answer(
             "အရင် Join လုပ်ပါဦး 😒",
             show_alert=True,
@@ -1870,19 +1786,13 @@ async def start_search(
     update,
     context,
 ):
-
     query = update.callback_query
 
     if query:
-
         await query.answer()
         message = query.message
-
     else:
-
-        message = (
-            update.effective_message
-        )
+        message = update.effective_message
 
     user_search_mode[
         update.effective_user.id
@@ -1904,21 +1814,17 @@ async def show_movie_list(
     movies,
     title="🎬 Movies",
 ):
-
     if not movies:
-
         await message.reply_text(
             "😒 မတွေ့သေးဘူးဟ။ "
             "Movie နာမည်နည်းနည်းတိတိကျကျ "
             "ရေးကြည့်။"
         )
-
         return
 
     buttons = []
 
     for movie in movies[:15]:
-
         label = str(
             movie.get(
                 "title",
@@ -1927,7 +1833,6 @@ async def show_movie_list(
         )[:48]
 
         if movie.get("year"):
-
             label += (
                 f" ({movie['year']})"
             )
@@ -1969,19 +1874,13 @@ async def show_latest_movies(
     update,
     context,
 ):
-
     query = update.callback_query
 
     if query:
-
         await query.answer()
         message = query.message
-
     else:
-
-        message = (
-            update.effective_message
-        )
+        message = update.effective_message
 
     await show_movie_list(
         message,
@@ -1994,7 +1893,6 @@ async def show_categories(
     update,
     context,
 ):
-
     query = update.callback_query
 
     await query.answer()
@@ -2010,19 +1908,15 @@ async def show_genre(
     context,
     genre,
 ):
-
     query = update.callback_query
 
     await query.answer()
 
     if genre == "All":
-
         movies = latest(15)
 
     else:
-
         with movie_lock:
-
             movies = [
                 movie
                 for movie
@@ -2051,7 +1945,6 @@ async def show_help(
     update,
     context,
 ):
-
     query = update.callback_query
 
     await query.answer()
@@ -2073,7 +1966,6 @@ async def start_ai(
     update,
     context,
 ):
-
     query = update.callback_query
 
     await query.answer()
@@ -2082,13 +1974,11 @@ async def start_ai(
     used = get_ai_usage(uid)
 
     if used >= FREE_AI_LIMIT:
-
         await query.message.reply_text(
             "ဟဲ့ 😒 AI quota ကုန်သွားပြီနော်။\n\n"
             "ငါ့ကို Movie မေး 😝🎬\n"
             "ကားရှာပေးတာတော့ မရပ်ဘူးဟဲ့။"
         )
-
         return
 
     user_search_mode.pop(
@@ -2107,7 +1997,6 @@ async def start_ai(
 
 
 async def ask_gemini(text):
-
     if not gemini_client:
         return None
 
@@ -2122,14 +2011,9 @@ async def ask_gemini(text):
     )
 
     try:
-
-        result = (
-            gemini_client
-            .models
-            .generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-            )
+        result = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
         )
 
         answer = getattr(
@@ -2146,12 +2030,10 @@ async def ask_gemini(text):
         return None
 
     except Exception as e:
-
         print(
             "Gemini error:",
             e,
         )
-
         return None
 
 
@@ -2164,11 +2046,9 @@ async def send_admin_request(
     update,
     query,
 ):
-
     user = update.effective_user
 
     try:
-
         await context.bot.send_message(
             ADMIN_CHAT_ID,
             (
@@ -2184,7 +2064,6 @@ async def send_admin_request(
         )
 
     except Exception as e:
-
         print(
             "admin request error:",
             e,
@@ -2196,10 +2075,7 @@ async def send_admin_request(
 # ============================================================
 
 def has_movie_intent(text):
-
-    n = normalize_text(
-        text
-    )
+    n = normalize_text(text)
 
     return any(
         normalize_text(word)
@@ -2210,10 +2086,7 @@ def has_movie_intent(text):
 
 
 def is_channel_request(text):
-
-    n = normalize_text(
-        text
-    )
+    n = normalize_text(text)
 
     return any(
         normalize_text(word)
@@ -2227,10 +2100,7 @@ async def handle_special_reply(
     message,
     text,
 ):
-
-    n = normalize_text(
-        text
-    )
+    n = normalize_text(text)
 
     if any(
         x in n
@@ -2241,21 +2111,17 @@ async def handle_special_reply(
             "hi",
         ]
     ):
-
         await message.reply_text(
             "ဟေး 😝 Xiao Yu CyB ပါ။ "
             "Movie ရှာမလား?"
         )
-
         return True
 
     if "နေကောင်း" in n:
-
         await message.reply_text(
             "ကောင်းတယ်ဟ 😝 Movie တွေစောင့်ပေးနေတာ။ "
             "မင်းကော?"
         )
-
         return True
 
     return False
@@ -2269,13 +2135,9 @@ async def web_app_data_handler(
     update,
     context,
 ):
-
     message = update.effective_message
 
-    if (
-        not message
-        or not message.web_app_data
-    ):
+    if not message or not message.web_app_data:
         return
 
     uid = update.effective_user.id
@@ -2284,13 +2146,11 @@ async def web_app_data_handler(
         context.bot,
         uid,
     ):
-
         await message.reply_text(
             "🎬 Movie Myanmar ကို Join "
             "လုပ်ပြီးမှ သုံးလို့ရမယ်နော်။",
             reply_markup=join_keyboard(),
         )
-
         return
 
     data = (
@@ -2299,19 +2159,14 @@ async def web_app_data_handler(
     ).strip()
 
     if data == "ai":
-
-        used = get_ai_usage(
-            uid
-        )
+        used = get_ai_usage(uid)
 
         if used >= FREE_AI_LIMIT:
-
             await message.reply_text(
                 "ဟဲ့ 😒 AI quota ကုန်သွားပြီနော်။\n\n"
                 "ငါ့ကို Movie မေး 😝🎬\n"
                 "ကားရှာပေးတာတော့ မရပ်ဘူးဟဲ့။"
             )
-
             return
 
         user_search_mode.pop(
@@ -2337,40 +2192,31 @@ async def message_handler(
     update,
     context,
 ):
-
     message = update.effective_message
 
     if not message:
         return
 
     uid = update.effective_user.id
-
     text = (
         message.text
         or ""
     ).strip()
 
-    # Admin uploader stays available even if admin is not a
-    # normal member of the public gate channel.
+    # Admin uploader caption step must work without membership gating.
     if is_admin_user(uid):
-
-        if await uploader_caption_handler(
-            update,
-            context,
-        ):
+        if await uploader_caption_handler(update, context):
             return
 
     if not await is_member(
         context.bot,
         uid,
     ):
-
         await message.reply_text(
             "🎬 Movie Myanmar ကို Join "
             "လုပ်ပြီးမှ သုံးလို့ရမယ်နော်။",
             reply_markup=join_keyboard(),
         )
-
         return
 
     if text.lower() in (
@@ -2378,7 +2224,6 @@ async def message_handler(
         "menu",
         "/home",
     ):
-
         user_search_mode.pop(
             uid,
             None,
@@ -2393,13 +2238,9 @@ async def message_handler(
             update,
             context,
         )
-
         return
 
-    if is_channel_request(
-        text
-    ):
-
+    if is_channel_request(text):
         await message.reply_text(
             "📺 Movie Myanmar Channel",
             reply_markup=InlineKeyboardMarkup(
@@ -2413,13 +2254,9 @@ async def message_handler(
                 ]
             ),
         )
-
         return
 
-    if user_search_mode.get(
-        uid
-    ):
-
+    if user_search_mode.get(uid):
         user_search_mode.pop(
             uid,
             None,
@@ -2430,7 +2267,6 @@ async def message_handler(
         )
 
         if results:
-
             await show_movie_list(
                 message,
                 results,
@@ -2438,7 +2274,6 @@ async def message_handler(
             )
 
         else:
-
             await send_admin_request(
                 context,
                 update,
@@ -2457,14 +2292,8 @@ async def message_handler(
 
         return
 
-    if user_ai_mode.get(
-        uid
-    ):
-
-        if get_ai_usage(
-            uid
-        ) >= FREE_AI_LIMIT:
-
+    if user_ai_mode.get(uid):
+        if get_ai_usage(uid) >= FREE_AI_LIMIT:
             user_ai_mode.pop(
                 uid,
                 None,
@@ -2475,7 +2304,6 @@ async def message_handler(
                 "ငါ့ကို Movie မေး 😝🎬\n"
                 "ကားရှာပေးတာတော့ မရပ်ဘူးဟဲ့။"
             )
-
             return
 
         answer = await ask_gemini(
@@ -2483,10 +2311,7 @@ async def message_handler(
         )
 
         if answer:
-
-            increase_ai_usage(
-                uid
-            )
+            increase_ai_usage(uid)
 
             await message.reply_text(
                 answer
@@ -2499,7 +2324,6 @@ async def message_handler(
             )
 
         else:
-
             await message.reply_text(
                 "😵 AI ခဏအလုပ်များနေတယ်။ "
                 "Movie နာမည်နဲ့လည်း စမ်းရှာလို့ရတယ်နော်။"
@@ -2515,19 +2339,14 @@ async def message_handler(
         has_movie_intent(text)
         or len(text.split()) <= 5
     ):
-
         await show_movie_list(
             message,
             results,
             "🔎 <b>Movie Results</b>",
         )
-
         return
 
-    if has_movie_intent(
-        text
-    ):
-
+    if has_movie_intent(text):
         await send_admin_request(
             context,
             update,
@@ -2544,7 +2363,6 @@ async def message_handler(
             ),
             parse_mode="HTML",
         )
-
         return
 
     if await handle_special_reply(
@@ -2563,69 +2381,30 @@ async def message_handler(
 
 
 # ============================================================
-# ADMIN UPLOADER
+# ADMIN MOVIE UPLOADER
 # ============================================================
 
-async def uploader_video_handler(
-    update,
-    context,
-):
-
+async def uploader_video_handler(update, context):
     message = update.effective_message
     user = update.effective_user
-
-    if (
-        not message
-        or not user
-        or not is_admin_user(user.id)
-    ):
+    if not message or not user or not is_admin_user(user.id):
         return False
 
     file_id = ""
-
     if message.video:
-
-        file_id = (
-            message.video.file_id
-        )
-
+        file_id = message.video.file_id
     elif message.document:
-
-        mime = str(
-            message.document.mime_type
-            or ""
-        ).lower()
-
-        name = str(
-            message.document.file_name
-            or ""
-        ).lower()
-
-        if (
-            mime.startswith("video/")
-            or name.endswith(
-                (
-                    ".mp4",
-                    ".mkv",
-                    ".mov",
-                    ".avi",
-                    ".webm",
-                    ".m4v",
-                )
-            )
-        ):
-
-            file_id = (
-                message.document.file_id
-            )
+        mime = str(message.document.mime_type or "").lower()
+        name = str(message.document.file_name or "").lower()
+        if mime.startswith("video/") or name.endswith((
+            ".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"
+        )):
+            file_id = message.document.file_id
 
     if not file_id:
         return False
 
-    uid = str(
-        user.id
-    )
-
+    uid = str(user.id)
     uploader_sessions[uid] = {
         "video_file_id": file_id,
         "poster_file_id": "",
@@ -2637,49 +2416,24 @@ async def uploader_video_handler(
         "🎬 Video ရပါပြီ။\n\n"
         "🖼️ အခု Poster ပုံတစ်ပုံ ပို့ပေးပါ။"
     )
-
     return True
 
 
-async def uploader_photo_handler(
-    update,
-    context,
-):
-
+async def uploader_photo_handler(update, context):
     message = update.effective_message
     user = update.effective_user
-
-    if (
-        not message
-        or not user
-        or not is_admin_user(user.id)
-    ):
+    if not message or not user or not is_admin_user(user.id):
         return False
 
-    uid = str(
-        user.id
-    )
-
-    session = uploader_sessions.get(
-        uid
-    )
-
-    if (
-        not session
-        or session.get("state")
-        != "poster"
-    ):
+    uid = str(user.id)
+    session = uploader_sessions.get(uid)
+    if not session or session.get("state") != "poster":
         return False
 
     if not message.photo:
         return False
 
-    session[
-        "poster_file_id"
-    ] = message.photo[
-        -1
-    ].file_id
-
+    session["poster_file_id"] = message.photo[-1].file_id
     session["state"] = "caption"
 
     await message.reply_text(
@@ -2687,81 +2441,41 @@ async def uploader_photo_handler(
         "📝 အခု Movie Caption ပို့ပေးပါ။\n"
         "ဥပမာ — Movie Name (2026) 1080p Myanmar Audio"
     )
-
     return True
 
 
-async def uploader_caption_handler(
-    update,
-    context,
-):
-
+async def uploader_caption_handler(update, context):
     message = update.effective_message
     user = update.effective_user
-
-    if (
-        not message
-        or not user
-        or not is_admin_user(user.id)
-    ):
+    if not message or not user or not is_admin_user(user.id):
         return False
 
-    uid = str(
-        user.id
-    )
-
-    session = uploader_sessions.get(
-        uid
-    )
-
-    if (
-        not session
-        or session.get("state")
-        != "caption"
-    ):
+    uid = str(user.id)
+    session = uploader_sessions.get(uid)
+    if not session or session.get("state") != "caption":
         return False
 
-    caption = str(
-        message.text
-        or message.caption
-        or ""
-    ).strip()
-
+    caption = str(message.text or message.caption or "").strip()
     if not caption:
-
-        await message.reply_text(
-            "📝 Caption လေး ပို့ပေးပါဦး။"
-        )
-
+        await message.reply_text("📝 Caption လေး ပို့ပေးပါဦး။")
         return True
 
-    session[
-        "caption"
-    ] = caption
-
-    session[
-        "state"
-    ] = "preview"
+    session["caption"] = caption
+    session["state"] = "preview"
 
     try:
-
         await context.bot.send_media_group(
             chat_id=user.id,
             media=[
                 InputMediaPhoto(
-                    media=session[
-                        "poster_file_id"
-                    ],
+                    media=session["poster_file_id"],
                 ),
                 InputMediaVideo(
-                    media=session[
-                        "video_file_id"
-                    ],
+                    media=session["video_file_id"],
                     caption=caption,
                 ),
             ],
         )
-
         await context.bot.send_message(
             chat_id=user.id,
             text=(
@@ -2772,14 +2486,8 @@ async def uploader_caption_handler(
             parse_mode="HTML",
             reply_markup=uploader_keyboard(),
         )
-
     except Exception as e:
-
-        print(
-            "Uploader preview error:",
-            e,
-        )
-
+        print("Uploader preview error:", e)
         await message.reply_text(
             "❌ Preview ပို့မရသေးဘူး။ ထပ်စမ်းကြည့်ပါ။"
         )
@@ -2787,211 +2495,96 @@ async def uploader_caption_handler(
     return True
 
 
-async def cancel_upload(
-    update,
-    context,
-):
-
+async def cancel_upload(update, context):
     query = update.callback_query
     user = update.effective_user
-
-    if (
-        not user
-        or not is_admin_user(user.id)
-    ):
-
-        await query.answer(
-            "Admin only",
-            show_alert=True,
-        )
-
+    if not user or not is_admin_user(user.id):
+        await query.answer("Admin only", show_alert=True)
         return
 
-    clear_uploader(
-        user.id
-    )
-
-    await query.answer(
-        "Cancelled"
-    )
-
+    clear_uploader(user.id)
+    await query.answer("Cancelled")
     try:
-
-        await query.edit_message_text(
-            "❌ Movie upload cancelled."
-        )
-
+        await query.edit_message_text("❌ Movie upload cancelled.")
     except Exception:
-
         await context.bot.send_message(
             chat_id=user.id,
-            text="❌ Movie upload cancelled.",
+            text="❌ Movie upload cancelled."
         )
 
 
-async def publish_upload(
-    update,
-    context,
-):
-
+async def publish_upload(update, context):
     query = update.callback_query
     user = update.effective_user
-
-    if (
-        not user
-        or not is_admin_user(user.id)
-    ):
-
-        await query.answer(
-            "Admin only",
-            show_alert=True,
-        )
-
+    if not user or not is_admin_user(user.id):
+        await query.answer("Admin only", show_alert=True)
         return
 
-    uid = str(
-        user.id
-    )
-
-    session = uploader_sessions.get(
-        uid
-    )
-
-    if (
-        not session
-        or session.get("state")
-        != "preview"
-    ):
-
-        await query.answer(
-            "Upload session မရှိတော့ဘူး။",
-            show_alert=True,
-        )
-
+    uid = str(user.id)
+    session = uploader_sessions.get(uid)
+    if not session or session.get("state") != "preview":
+        await query.answer("Upload session မရှိတော့ဘူး။", show_alert=True)
         return
 
-    storage_id = (
-        get_storage_channel_id()
-    )
-
+    storage_id = get_storage_channel_id()
     if not storage_id:
-
-        await query.answer(
-            "Storage Channel ID မသိသေးဘူး။",
-            show_alert=True,
-        )
-
+        await query.answer("Storage Channel ID မသိသေးဘူး။", show_alert=True)
         await context.bot.send_message(
             chat_id=user.id,
             text=(
-                "⚠️ Private Movie Storage Channel ID "
-                "ကို auto-detect မလုပ်ရသေးဘူး။\n\n"
-                "Bot ကို Storage Channel ထဲမှာ Admin ထားပြီး၊ "
-                "အဲဒီ Channel ထဲကို test message တစ်ခု post လုပ်ပေးပါ။\n"
+                "⚠️ Private Movie Storage Channel ID ကို auto-detect မလုပ်ရသေးဘူး။\n\n"
+                "Bot ကို Storage Channel ထဲမှာ Admin ထားပြီး၊ အဲဒီ Channel ထဲကို test message တစ်ခု post လုပ်ပေးပါ။\n"
                 "ပြီးရင် ဒီ movie ကို ပြန် upload လုပ်ပါ။"
             ),
         )
-
         return
 
     try:
-
-        sent = (
-            await context.bot.send_media_group(
-                chat_id=int(storage_id),
-                media=[
-                    InputMediaPhoto(
-                        media=session[
-                            "poster_file_id"
-                        ],
-                    ),
-                    InputMediaVideo(
-                        media=session[
-                            "video_file_id"
-                        ],
-                        caption=session[
-                            "caption"
-                        ],
-                    ),
-                ],
-            )
+        sent = await context.bot.send_media_group(
+            chat_id=int(storage_id),
+            media=[
+                InputMediaPhoto(
+                    media=session["poster_file_id"],
+                ),
+                InputMediaVideo(
+                    media=session["video_file_id"],
+                    caption=session["caption"],
+                ),
+            ],
         )
 
-        sent = sorted(
-            sent,
-            key=lambda m: m.message_id,
-        )
-
+        sent = sorted(sent, key=lambda m: m.message_id)
         movie = build_movie_from_messages(
             sent,
             session["caption"],
         )
-
         if not movie:
-            raise RuntimeError(
-                "Could not build movie record"
-            )
+            raise RuntimeError("Could not build movie record from published album")
 
-        movie[
-            "storage_channel"
-        ] = str(
-            storage_id
-        )
-
-        save_movie_record(
-            movie
-        )
+        movie["storage_channel"] = str(storage_id)
+        save_movie_record(movie)
 
         group_id = str(
-            getattr(
-                sent[0],
-                "media_group_id",
-                "",
-            )
-            or ""
+            getattr(sent[0], "media_group_id", "") or ""
         )
-
         if group_id:
-
             published_album_ids.add(
-                (
-                    str(storage_id),
-                    group_id,
-                )
+                (str(storage_id), group_id)
             )
 
-        clear_uploader(
-            user.id
-        )
-
-        await query.answer(
-            "Published 🎬"
-        )
-
+        clear_uploader(user.id)
+        await query.answer("Published 🎬")
         try:
-
             await query.edit_message_text(
                 "✅ <b>PUBLISHED</b>\n\n"
-                + html.escape(
-                    str(
-                        movie.get(
-                            "title",
-                            "Movie",
-                        )
-                    )
-                )
-                + "\n\nMini App ထဲမှာလည်း "
-                "ထည့်ပြီးပါပြီ။",
+                + html.escape(str(movie.get("title", "Movie")))
+                + "\n\nMini App ထဲမှာလည်း ထည့်ပြီးပါပြီ။",
                 parse_mode="HTML",
             )
-
         except Exception:
-
             await context.bot.send_message(
                 chat_id=user.id,
-                text=(
-                    "✅ Movie published successfully."
-                ),
+                text="✅ Movie published successfully."
             )
 
         print(
@@ -3000,51 +2593,27 @@ async def publish_upload(
             "Storage:",
             storage_id,
             "Messages:",
-            movie.get(
-                "storage_message_ids"
-            ),
+            movie.get("storage_message_ids"),
         )
 
     except Exception as e:
-
-        print(
-            "Uploader publish error:",
-            e,
-        )
-
-        await query.answer(
-            "Publish မအောင်မြင်သေးဘူး။",
-            show_alert=True,
-        )
-
+        print("Uploader publish error:", e)
+        await query.answer("Publish မအောင်မြင်သေးဘူး။", show_alert=True)
         await context.bot.send_message(
             chat_id=user.id,
             text=(
                 "❌ Publish မအောင်မြင်သေးဘူး။\n\n"
-                "Storage Channel ထဲမှာ Bot က post/media "
-                "ပို့ခွင့်ရှိမရှိ စစ်ပေးပါ။\n"
+                "Storage Channel ထဲမှာ Bot က post/media ပို့ခွင့်ရှိမရှိ စစ်ပေးပါ။\n"
                 f"Error: {e}"
             ),
         )
 
 
-async def cancel_upload_command(
-    update,
-    context,
-):
-
+async def cancel_upload_command(update, context):
     user = update.effective_user
-
-    if (
-        not user
-        or not is_admin_user(user.id)
-    ):
+    if not user or not is_admin_user(user.id):
         return
-
-    clear_uploader(
-        user.id
-    )
-
+    clear_uploader(user.id)
     await update.effective_message.reply_text(
         "❌ Upload session cancelled."
     )
@@ -3058,106 +2627,75 @@ async def callback_handler(
     update,
     context,
 ):
-
     query = update.callback_query
     data = query.data or ""
-    uid = query.from_user.id
 
-    # --------------------------------------------------------
-    # ADMIN UPLOADER CALLBACKS
-    # These are intentionally allowed before public membership
-    # because the admin uploader must continue working.
-    # --------------------------------------------------------
-
+    # Upload controls are admin-only and must remain usable even when
+    # the admin is not a member of the public gate channel.
     if data == "uploader_publish":
-        return await publish_upload(
-            update,
-            context,
-        )
+        return await publish_upload(update, context)
 
     if data == "uploader_cancel":
-        return await cancel_upload(
-            update,
-            context,
-        )
-
-    # --------------------------------------------------------
-    # PUBLIC GATE
-    # Every normal callback is checked again.
-    # If user leaves the channel after opening the bot,
-    # callbacks become locked again.
-    # --------------------------------------------------------
-
-    if not await is_member(
-        context.bot,
-        uid,
-    ):
-
-        try:
-            await query.answer(
-                "🎬 အရင် Movie Myanmar ကို Join လုပ်ပါ။",
-                show_alert=True,
-            )
-        except Exception:
-            pass
-
-        try:
-
-            await query.message.reply_text(
-                "🔒 Movie Myanmar ကို Join လုပ်ပြီးမှ "
-                "ဆက်သုံးလို့ရမယ်နော်။",
-                reply_markup=join_keyboard(),
-            )
-
-        except Exception:
-            pass
-
-        return
+        return await cancel_upload(update, context)
 
     if data == "check_join":
-
         return await check_join(
             update,
             context,
         )
 
-    if data == "home":
+    # Every normal bot feature callback is re-checked. This means a user
+    # who leaves the gate channel later is locked again immediately.
+    if not await is_member(
+        context.bot,
+        query.from_user.id,
+    ):
+        await query.answer(
+            "🔒 Movie Myanmar Channel ကို Join အရင်လုပ်ပါ။",
+            show_alert=True,
+        )
 
+        try:
+            await query.message.reply_text(
+                "🎬 Movie Myanmar ကို Join လုပ်ပြီးမှ သုံးလို့ရမယ်နော် 😝",
+                reply_markup=join_keyboard(),
+            )
+        except Exception:
+            pass
+
+        return
+
+    if data == "home":
         return await show_home(
             update,
             context,
         )
 
     if data == "search":
-
         return await start_search(
             update,
             context,
         )
 
     if data == "categories":
-
         return await show_categories(
             update,
             context,
         )
 
     if data == "latest":
-
         return await show_latest_movies(
             update,
             context,
         )
 
     if data == "ai":
-
         return await start_ai(
             update,
             context,
         )
 
     if data == "help":
-
         return await show_help(
             update,
             context,
@@ -3166,7 +2704,6 @@ async def callback_handler(
     if data.startswith(
         "genre:"
     ):
-
         return await show_genre(
             update,
             context,
@@ -3177,11 +2714,9 @@ async def callback_handler(
         )
 
     if data == "next_poster":
-
         await query.answer()
 
         if WebAppInfo:
-
             markup = InlineKeyboardMarkup(
                 [
                     [
@@ -3199,7 +2734,6 @@ async def callback_handler(
             )
 
         else:
-
             markup = InlineKeyboardMarkup(
                 [
                     [
@@ -3226,70 +2760,44 @@ async def callback_handler(
 # CHANNEL POST HANDLER
 # ============================================================
 
-def is_movie_storage_channel(
-    message
-):
-
-    if (
-        not message
-        or not message.chat
-    ):
+def is_movie_storage_channel(message):
+    """Return True only for the configured/learned private storage channel."""
+    if not message or not message.chat:
         return False
 
-    chat_id = str(
-        message.chat_id
-    )
+    chat_id = str(message.chat_id)
 
+    # Explicit Render environment variable wins.
     if MOVIE_STORAGE_CHAT_ID:
+        return chat_id == MOVIE_STORAGE_CHAT_ID
 
-        return (
-            chat_id
-            == MOVIE_STORAGE_CHAT_ID
-        )
-
+    # If we already learned the channel, never accept another
+    # private channel by accident.
     known = get_storage_channel_id()
-
     if known:
-
-        return (
-            chat_id
-            == known
-        )
+        return chat_id == known
 
     username = (
         message.chat.username
         or ""
     ).strip().lower()
 
-    expected_main = (
-        MAIN_CHANNEL
-        .lstrip("@")
-        .lower()
-    )
+    expected_main = MAIN_CHANNEL.lstrip("@").lower()
 
     if username == expected_main:
         return False
 
+    # First private channel post becomes the storage channel.
+    # The bot only receives channel_post updates from channels
+    # where it has access/admin rights.
     return not username
 
 
-def build_storage_post_link(
-    message
-):
+def build_storage_post_link(message):
+    chat_id = str(message.chat_id)
+    message_id = message.message_id
 
-    chat_id = str(
-        message.chat_id
-    )
-
-    message_id = (
-        message.message_id
-    )
-
-    if (
-        chat_id.startswith("-100")
-        and message_id
-    ):
-
+    if chat_id.startswith("-100") and message_id:
         return (
             "https://t.me/c/"
             f"{chat_id[4:]}/"
@@ -3297,7 +2805,6 @@ def build_storage_post_link(
         )
 
     if message.chat.username:
-
         return (
             "https://t.me/"
             f"{message.chat.username}/"
@@ -3307,139 +2814,77 @@ def build_storage_post_link(
     return MOVIE_CHANNEL_URL
 
 
-def build_movie_from_messages(
-    messages,
-    caption_override=None,
-):
-
-    messages = [
-        m
-        for m in messages
-        if m
-    ]
-
+def build_movie_from_messages(messages, caption_override=None):
+    """Build one canonical movie record from a Telegram media group."""
+    messages = [m for m in messages if m]
     if not messages:
         return None
 
-    messages.sort(
-        key=lambda m: m.message_id
-    )
+    messages.sort(key=lambda m: m.message_id)
 
     video_message = next(
         (
-            m
-            for m in messages
-            if getattr(
-                m,
-                "video",
-                None,
-            )
+            m for m in messages
+            if getattr(m, "video", None)
         ),
         None,
     )
 
     photo_message = next(
         (
-            m
-            for m in messages
-            if getattr(
-                m,
-                "photo",
-                None,
-            )
+            m for m in messages
+            if getattr(m, "photo", None)
         ),
         None,
     )
 
+    # Some clients may send the movie as a video document.
     if video_message is None:
-
         video_message = next(
             (
-                m
-                for m in messages
+                m for m in messages
                 if (
-                    getattr(
-                        m,
-                        "document",
-                        None,
-                    )
+                    getattr(m, "document", None)
                     and str(
-                        getattr(
-                            m.document,
-                            "mime_type",
-                            "",
-                        )
+                        getattr(m.document, "mime_type", "")
                         or ""
-                    )
-                    .lower()
-                    .startswith(
-                        "video/"
-                    )
+                    ).lower().startswith("video/")
                 )
             ),
             None,
         )
 
-    caption = str(
-        caption_override
-        or ""
-    ).strip()
-
+    caption = str(caption_override or "").strip()
     if not caption:
-
         for m in messages:
-
             candidate = str(
-                getattr(
-                    m,
-                    "caption",
-                    "",
-                )
-                or getattr(
-                    m,
-                    "text",
-                    "",
-                )
+                getattr(m, "caption", "")
+                or getattr(m, "text", "")
                 or ""
             ).strip()
-
             if candidate:
-
                 caption = candidate
                 break
 
     if video_message is None:
+        # A poster-only channel post is not a complete movie.
         return None
 
     source = video_message
-
-    text = (
-        caption
-        or "Untitled Movie"
-    )
-
+    text = caption or "Untitled Movie"
     lines = [
         x.strip()
         for x in text.splitlines()
         if x.strip()
     ]
+    title = lines[0] if lines else "Untitled Movie"
 
-    title = (
-        lines[0]
-        if lines
-        else "Untitled Movie"
-    )
-
-    year = extract_year(
-        text
-    )
-
+    year = extract_year(text)
     quality_match = re.search(
         r"\b(2160p|4k|1080p|720p|480p)\b",
         text,
         re.I,
     )
-
     audio_match = re.search(
         r"(Burmese|Myanmar|English|Dual|Multi)[ -]?Audio",
         text,
@@ -3447,83 +2892,39 @@ def build_movie_from_messages(
     )
 
     poster_file_id = ""
-
-    if (
-        photo_message
-        and photo_message.photo
-    ):
-
-        poster_file_id = (
-            photo_message
-            .photo[-1]
-            .file_id
-        )
+    if photo_message and photo_message.photo:
+        poster_file_id = photo_message.photo[-1].file_id
 
     movie = {
         "title": title,
         "year": year,
         "quality": (
             quality_match.group(1).upper()
-            if quality_match
-            else ""
+            if quality_match else ""
         ),
         "audio": (
             audio_match.group(0)
-            if audio_match
-            else ""
+            if audio_match else ""
         ),
         "original_name": title,
-        "genres": detect_genres(
-            text
-        ),
+        "genres": detect_genres(text),
         "description": text,
-        "post_link": (
-            build_storage_post_link(
-                source
-            )
-        ),
-        "chat_id": str(
-            source.chat_id
-        ),
-        "message_id": (
-            source.message_id
-        ),
-        "poster_file_id": (
-            poster_file_id
-        ),
+        "post_link": build_storage_post_link(source),
+        "chat_id": str(source.chat_id),
+        "message_id": source.message_id,
+        "poster_file_id": poster_file_id,
         "media_group_id": str(
-            getattr(
-                source,
-                "media_group_id",
-                "",
-            )
-            or ""
+            getattr(source, "media_group_id", "") or ""
         ),
         "storage_message_ids": [
-            m.message_id
-            for m in messages
+            m.message_id for m in messages
         ],
     }
 
-    if getattr(
-        source,
-        "video",
-        None,
-    ):
-
-        movie[
-            "video_file_id"
-        ] = source.video.file_id
-
-    elif getattr(
-        source,
-        "document",
-        None,
-    ):
-
-        movie[
-            "video_file_id"
-        ] = source.document.file_id
+    if getattr(source, "video", None):
+        movie["video_file_id"] = source.video.file_id
+    elif getattr(source, "document", None):
+        movie["video_file_id"] = source.document.file_id
 
     movie["id"] = generate_movie_id(
         source.chat_id,
@@ -3533,196 +2934,80 @@ def build_movie_from_messages(
     return movie
 
 
-def movie_already_saved(
-    movie
-):
-
+def movie_already_saved(movie):
     if not movie:
         return False
 
-    chat_id = str(
-        movie.get(
-            "chat_id",
-            "",
-        )
-    )
-
-    message_id = movie.get(
-        "message_id"
-    )
-
-    group_id = str(
-        movie.get(
-            "media_group_id",
-            "",
-        )
-    )
-
-    movie_id = str(
-        movie.get(
-            "id",
-            "",
-        )
-    )
+    chat_id = str(movie.get("chat_id", ""))
+    message_id = movie.get("message_id")
+    group_id = str(movie.get("media_group_id", ""))
+    movie_id = str(movie.get("id", ""))
 
     with movie_lock:
-
         for old in movie_database:
-
-            if (
-                movie_id
-                and str(
-                    old.get(
-                        "id",
-                        "",
-                    )
-                )
-                == movie_id
-            ):
+            if movie_id and str(old.get("id", "")) == movie_id:
                 return True
-
             if (
                 chat_id
-                and str(
-                    old.get(
-                        "chat_id",
-                        "",
-                    )
-                )
-                == chat_id
+                and str(old.get("chat_id", "")) == chat_id
                 and message_id
-                and old.get(
-                    "message_id"
-                )
-                == message_id
+                and old.get("message_id") == message_id
             ):
                 return True
-
             if (
                 group_id
-                and str(
-                    old.get(
-                        "media_group_id",
-                        "",
-                    )
-                )
-                == group_id
-                and str(
-                    old.get(
-                        "storage_channel",
-                        "",
-                    )
-                )
-                == chat_id
+                and str(old.get("media_group_id", "")) == group_id
+                and str(old.get("storage_channel", "")) == chat_id
             ):
                 return True
-
     return False
 
 
-def save_movie_record(
-    movie
-):
-
+def save_movie_record(movie):
     if not movie:
         return False
 
     replaced = False
-
     with movie_lock:
-
-        for i, old in enumerate(
-            movie_database
-        ):
-
+        for i, old in enumerate(movie_database):
             same = (
-                str(
-                    old.get(
-                        "id",
-                        "",
-                    )
-                )
-                == str(
-                    movie.get(
-                        "id",
-                        "",
-                    )
-                )
+                str(old.get("id", ""))
+                == str(movie.get("id", ""))
             )
-
             if not same:
-
                 same = (
-                    str(
-                        old.get(
-                            "chat_id",
-                            "",
-                        )
-                    )
-                    == str(
-                        movie.get(
-                            "chat_id",
-                            "",
-                        )
-                    )
-                    and old.get(
-                        "message_id"
-                    )
-                    == movie.get(
-                        "message_id"
-                    )
+                    str(old.get("chat_id", ""))
+                    == str(movie.get("chat_id", ""))
+                    and old.get("message_id")
+                    == movie.get("message_id")
                 )
-
             if same:
-
                 movie_database[i] = movie
                 replaced = True
                 break
 
         if not replaced:
+            movie_database.append(movie)
 
-            movie_database.append(
-                movie
-            )
-
-    # Actual movie update/add only.
     save_movies()
-
     invalidate_carousel()
-
     return not replaced
 
 
-async def save_album_as_movie(
-    messages,
-    caption=None,
-):
-
+async def save_album_as_movie(messages, caption=None):
     if not messages:
         return
 
     messages = sorted(
-        [
-            m
-            for m in messages
-            if m
-        ],
+        [m for m in messages if m],
         key=lambda m: m.message_id,
     )
 
     group_id = str(
-        getattr(
-            messages[0],
-            "media_group_id",
-            "",
-        )
-        or ""
+        getattr(messages[0], "media_group_id", "") or ""
     )
-
     key = (
-        str(
-            messages[0].chat_id
-        ),
+        str(messages[0].chat_id),
         group_id,
     )
 
@@ -3733,33 +3018,19 @@ async def save_album_as_movie(
         messages,
         caption,
     )
-
     if not movie:
         return
 
-    movie[
-        "storage_channel"
-    ] = str(
+    movie["storage_channel"] = str(
         messages[0].chat_id
     )
 
-    if movie_already_saved(
-        movie
-    ):
-
-        published_album_ids.add(
-            key
-        )
-
+    if movie_already_saved(movie):
+        published_album_ids.add(key)
         return
 
-    save_movie_record(
-        movie
-    )
-
-    published_album_ids.add(
-        key
-    )
+    save_movie_record(movie)
+    published_album_ids.add(key)
 
     print(
         "Saved PRIVATE movie album:",
@@ -3767,154 +3038,71 @@ async def save_album_as_movie(
         "Storage Chat:",
         messages[0].chat_id,
         "Messages:",
-        movie.get(
-            "storage_message_ids"
-        ),
+        movie.get("storage_message_ids"),
         "Link:",
-        movie.get(
-            "post_link"
-        ),
+        movie.get("post_link"),
         "ID:",
-        movie.get(
-            "id"
-        ),
+        movie.get("id"),
         "Total:",
         len(movie_database),
     )
 
 
-async def process_album_later(
-    key
-):
-
+async def process_album_later(key):
     try:
-
-        await asyncio.sleep(
-            1.2
-        )
-
-        messages = album_buffers.pop(
-            key,
-            [],
-        )
-
-        album_tasks.pop(
-            key,
-            None,
-        )
-
+        await asyncio.sleep(1.2)
+        messages = album_buffers.pop(key, [])
+        album_tasks.pop(key, None)
         if messages:
-
-            await save_album_as_movie(
-                messages
-            )
-
+            await save_album_as_movie(messages)
     except Exception as e:
-
-        print(
-            "Album processing error:",
-            e,
-        )
+        print("Album processing error:", e)
 
 
-async def channel_post_handler(
-    update,
-    context,
-):
-
+async def channel_post_handler(update, context):
     message = update.channel_post
 
-    if (
-        not message
-        or not is_movie_storage_channel(
-            message
-        )
-    ):
+    if not message or not is_movie_storage_channel(message):
         return
 
     global AUTO_STORAGE_CHAT_ID
 
+    # Learn and persist the first valid private storage channel.
     if not MOVIE_STORAGE_CHAT_ID:
-
-        discovered = str(
-            message.chat_id
-        )
-
+        discovered = str(message.chat_id)
         if not AUTO_STORAGE_CHAT_ID:
-
-            AUTO_STORAGE_CHAT_ID = (
-                discovered
-            )
-
-            save_storage_channel_id(
-                discovered
-            )
-
+            AUTO_STORAGE_CHAT_ID = discovered
+            save_storage_channel_id(discovered)
             print(
                 "Auto-detected Movie Storage Channel:",
                 discovered,
             )
 
     group_id = str(
-        getattr(
-            message,
-            "media_group_id",
-            "",
-        )
-        or ""
+        getattr(message, "media_group_id", "") or ""
     )
 
     if group_id:
-
         key = (
-            str(
-                message.chat_id
-            ),
+            str(message.chat_id),
             group_id,
         )
+        album_buffers.setdefault(key, []).append(message)
 
-        album_buffers.setdefault(
-            key,
-            []
-        ).append(
-            message
-        )
-
-        task = album_tasks.get(
-            key
-        )
-
-        if (
-            task is None
-            or task.done()
-        ):
-
-            album_tasks[key] = (
-                asyncio.create_task(
-                    process_album_later(
-                        key
-                    )
-                )
+        task = album_tasks.get(key)
+        if task is None or task.done():
+            album_tasks[key] = asyncio.create_task(
+                process_album_later(key)
             )
-
         return
 
-    movie = build_movie_from_messages(
-        [message]
-    )
-
+    # Single-post fallback. This also supports older stored movies.
+    movie = build_movie_from_messages([message])
     if not movie:
         return
 
-    movie[
-        "storage_channel"
-    ] = str(
-        message.chat_id
-    )
-
-    save_movie_record(
-        movie
-    )
+    movie["storage_channel"] = str(message.chat_id)
+    save_movie_record(movie)
 
     print(
         "Saved PRIVATE movie:",
@@ -3933,333 +3121,14 @@ async def channel_post_handler(
 
 
 # ============================================================
-# MINI APP AUTH HELPERS
-# ============================================================
-
-def verify_telegram_webapp_init_data(
-    init_data
-):
-    """
-    Verify Telegram WebApp initData using the official
-    HMAC-SHA256 WebAppData algorithm.
-
-    Returns the Telegram user dict on success.
-    Returns None on failure.
-    """
-
-    if not BOT_TOKEN:
-        return None
-
-    if not init_data:
-        return None
-
-    try:
-
-        values = {}
-
-        for item in init_data.split("&"):
-
-            if "=" not in item:
-                continue
-
-            key, value = item.split(
-                "=",
-                1,
-            )
-
-            values[key] = value
-
-        received_hash = values.pop(
-            "hash",
-            "",
-        )
-
-        if not received_hash:
-            return None
-
-        data_check_string = "\n".join(
-            f"{key}={values[key]}"
-            for key in sorted(values)
-        )
-
-        secret_key = hmac.new(
-            b"WebAppData",
-            BOT_TOKEN.encode(
-                "utf-8"
-            ),
-            hashlib.sha256,
-        ).digest()
-
-        calculated_hash = hmac.new(
-            secret_key,
-            data_check_string.encode(
-                "utf-8"
-            ),
-            hashlib.sha256,
-        ).hexdigest()
-
-        if not hmac.compare_digest(
-            calculated_hash,
-            received_hash,
-        ):
-            print(
-                "Mini App auth failed: invalid hash"
-            )
-            return None
-
-        auth_date = int(
-            values.get(
-                "auth_date",
-                "0",
-            )
-        )
-
-        if not auth_date:
-            return None
-
-        if (
-            abs(
-                int(time.time())
-                - auth_date
-            )
-            > WEBAPP_AUTH_MAX_AGE
-        ):
-
-            print(
-                "Mini App auth failed: expired initData"
-            )
-
-            return None
-
-        user_raw = values.get(
-            "user",
-            "",
-        )
-
-        if not user_raw:
-            return None
-
-        user = json.loads(
-            unquote(
-                user_raw
-            )
-        )
-
-        if not isinstance(
-            user,
-            dict,
-        ):
-            return None
-
-        if not user.get(
-            "id"
-        ):
-            return None
-
-        return user
-
-    except Exception as e:
-
-        print(
-            "Mini App initData verify error:",
-            e,
-        )
-
-        return None
-
-
-def get_header_case_insensitive(
-    handler,
-    name,
-):
-    try:
-
-        value = handler.headers.get(
-            name
-        )
-
-        if value:
-            return value.strip()
-
-        target = name.lower()
-
-        for key, value in handler.headers.items():
-
-            if key.lower() == target:
-
-                return str(
-                    value
-                ).strip()
-
-    except Exception:
-        pass
-
-    return ""
-
-
-def telegram_get_chat_member_sync(
-    user_id
-):
-    """
-    Synchronous Bot API membership check for the HTTP server.
-    This is used by Mini App API requests.
-    """
-
-    if not BOT_TOKEN:
-        return False
-
-    try:
-
-        payload = json.dumps(
-            {
-                "chat_id": MAIN_CHANNEL,
-                "user_id": int(
-                    user_id
-                ),
-            }
-        ).encode("utf-8")
-
-        request = Request(
-            (
-                "https://api.telegram.org/bot"
-                + BOT_TOKEN
-                + "/getChatMember"
-            ),
-            data=payload,
-            headers={
-                "Content-Type":
-                    "application/json",
-                "User-Agent":
-                    "movie-myanmar-mini-app",
-            },
-            method="POST",
-        )
-
-        with urlopen(
-            request,
-            timeout=8,
-        ) as response:
-
-            result = json.loads(
-                response.read().decode(
-                    "utf-8"
-                )
-            )
-
-        if not result.get(
-            "ok"
-        ):
-            print(
-                "Mini App membership API error:",
-                result,
-            )
-            return False
-
-        member = result.get(
-            "result",
-            {},
-        )
-
-        status = member.get(
-            "status",
-            "",
-        )
-
-        return status in (
-            "member",
-            "administrator",
-            "creator",
-            "restricted",
-        )
-
-    except Exception as e:
-
-        print(
-            "Mini App membership check error:",
-            e,
-        )
-
-        return False
-
-
-def mini_app_authorize(
-    handler
-):
-    """
-    Protected Mini App API gate.
-
-    The browser must send Telegram's initData in:
-        X-Telegram-Init-Data
-
-    Then:
-      1. Telegram signature is verified.
-      2. Telegram user ID is extracted.
-      3. Current channel membership is checked again.
-
-    This prevents a direct browser/API request from bypassing
-    the Movie Myanmar join gate.
-    """
-
-    init_data = get_header_case_insensitive(
-        handler,
-        "X-Telegram-Init-Data",
-    )
-
-    if not init_data:
-
-        return (
-            False,
-            None,
-            "Mini App ကို Telegram ထဲကနေ ဖွင့်ပါ။",
-        )
-
-    user = (
-        verify_telegram_webapp_init_data(
-            init_data
-        )
-    )
-
-    if not user:
-
-        return (
-            False,
-            None,
-            "Telegram authentication မအောင်မြင်ပါ။",
-        )
-
-    user_id = user.get(
-        "id"
-    )
-
-    if not telegram_get_chat_member_sync(
-        user_id
-    ):
-
-        return (
-            False,
-            user,
-            "🔒 Movie Myanmar ကို Join လုပ်ပြီးမှ သုံးလို့ရမယ်နော်။",
-        )
-
-    return (
-        True,
-        user,
-        "",
-    )
-
-
-# ============================================================
-# MINI APP HTML
+# MINI APP
 # ============================================================
 
 MINI_APP_HTML = r'''<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
-<meta
-    name="viewport"
-    content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"
->
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 
 <title>Movie Myanmar</title>
 
@@ -4270,120 +3139,13 @@ MINI_APP_HTML = r'''<!doctype html>
     box-sizing:border-box
 }
 
-html,
 body{
     margin:0;
-    padding:0;
-    width:100%;
-    min-height:100%;
     background:#07070d;
     color:#f6f4ff;
     font-family:Arial,sans-serif;
     overflow-x:hidden
 }
-
-body{
-    min-height:100vh
-}
-
-/* ==========================================================
-   LOADING / WAKE SCREEN
-   ========================================================== */
-
-#splash{
-    position:fixed;
-    inset:0;
-    z-index:9999;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    flex-direction:column;
-    text-align:center;
-    background:
-        radial-gradient(
-            circle at 50% 15%,
-            #32106b 0,
-            #120b22 34%,
-            #05050a 78%,
-            #020205 100%
-        );
-    transition:opacity .35s ease
-}
-
-#splash.hide{
-    opacity:0;
-    pointer-events:none
-}
-
-.logo{
-    font-size:30px;
-    font-weight:1000;
-    letter-spacing:2px;
-    text-shadow:
-        0 0 18px #8d5cff88,
-        0 0 42px #5af5ff44
-}
-
-.logo span{
-    color:#6cf6ff
-}
-
-.splash-sub{
-    margin-top:7px;
-    color:#a9a1bd;
-    font-size:12px
-}
-
-.spinner{
-    width:44px;
-    height:44px;
-    margin-top:28px;
-    border-radius:50%;
-    border:3px solid #2c2440;
-    border-top-color:#6cf6ff;
-    border-right-color:#bb5cff;
-    animation:spin .85s linear infinite
-}
-
-@keyframes spin{
-    to{
-        transform:rotate(360deg)
-    }
-}
-
-.splash-text{
-    margin-top:16px;
-    color:#ddd7ea;
-    font-size:13px
-}
-
-.splash-small{
-    margin-top:8px;
-    color:#777187;
-    font-size:11px;
-    max-width:270px;
-    line-height:1.5
-}
-
-.retry-btn{
-    display:none;
-    margin-top:20px;
-    border:0;
-    border-radius:13px;
-    padding:12px 20px;
-    background:linear-gradient(
-        135deg,
-        #5af5ff,
-        #bb5cff
-    );
-    color:#07070d;
-    font-weight:900
-}
-
-
-/* ==========================================================
-   APP
-   ========================================================== */
 
 .app{
     width:100%;
@@ -4596,21 +3358,6 @@ body{
     color:#9992a8
 }
 
-.loader{
-    width:100%;
-    padding:30px 10px;
-    text-align:center;
-    color:#aaa
-}
-
-.api-status{
-    display:none;
-    padding:9px 14px;
-    text-align:center;
-    color:#a9a1bd;
-    font-size:11px
-}
-
 .overlay{
     display:none;
     position:fixed;
@@ -4666,60 +3413,98 @@ body{
     font-weight:900;
     margin-top:14px
 }
+
+.loader{
+    text-align:center;
+    padding:20px;
+    color:#aaa
+}
+
+.splash{
+    position:fixed;
+    inset:0;
+    z-index:100;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:24px;
+    background:
+        radial-gradient(circle at 50% 20%, #35156b 0, #0b0913 42%, #05050a 100%);
+    text-align:center;
+}
+
+.splash-card{
+    width:100%;
+    max-width:390px;
+    padding:28px 22px;
+    border:1px solid #3b2b59;
+    border-radius:24px;
+    background:rgba(12,10,21,.86);
+    box-shadow:0 20px 70px #0009;
+}
+
+.splash-logo{
+    font-size:29px;
+    font-weight:900;
+    letter-spacing:1.4px;
+}
+
+.splash-logo span{
+    color:#6cf6ff;
+}
+
+.splash-sub{
+    color:#aaa3bd;
+    font-size:12px;
+    margin-top:7px;
+}
+
+.spinner{
+    width:34px;
+    height:34px;
+    margin:25px auto 15px;
+    border:3px solid #312747;
+    border-top-color:#6cf6ff;
+    border-right-color:#bb5cff;
+    border-radius:50%;
+    animation:spin .8s linear infinite;
+}
+
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.splash-text{
+    color:#e9e3f7;
+    font-size:13px;
+    line-height:1.6;
+}
+
+.gate-buttons{
+    display:grid;
+    gap:10px;
+    margin-top:20px;
+}
+
+.gate-buttons button{
+    width:100%;
+    padding:13px;
+    border:0;
+    border-radius:13px;
+    font-weight:900;
+    background:linear-gradient(135deg,#5af5ff,#bb5cff);
+    color:#07070d;
+}
+
+.gate-buttons button.secondary{
+    background:#211b31;
+    color:#fff;
+    border:1px solid #3d3157;
+}
 </style>
 </head>
 
 <body>
 
-<!-- ========================================================
-     LOADING SCREEN
-     ======================================================== -->
-
-<div id="splash">
-
-    <div class="logo">
-        MOVIE <span>MYANMAR</span>
-    </div>
-
-    <div class="splash-sub">
-        Xiao Yu CyB • Cinema Mini App
-    </div>
-
-    <div
-        id="spinner"
-        class="spinner"
-    ></div>
-
-    <div
-        id="splashText"
-        class="splash-text"
-    >
-        Loading Movie Myanmar...
-    </div>
-
-    <div
-        id="splashSmall"
-        class="splash-small"
-    >
-        Movie database ကို ပြန်နိုးနေပါတယ်။
-    </div>
-
-    <button
-        id="retryBtn"
-        class="retry-btn"
-        onclick="boot(true)"
-    >
-        🔄 Try Again
-    </button>
-
-</div>
-
-
-<main
-    id="mainApp"
-    class="app"
-    style="display:none"
->
+<main id="appRoot" class="app" style="display:none">
 
 <header class="top">
 
@@ -4745,11 +3530,6 @@ Xiao Yu CyB • Cinema Mini App
 </div>
 
 </header>
-
-<div
-    id="apiStatus"
-    class="api-status"
-></div>
 
 <section class="section">
 
@@ -4785,10 +3565,7 @@ Swipe →
 
 </div>
 
-<div
-    id="rail"
-    class="rail"
->
+<div id="rail" class="rail">
 
 <div class="loader">
 Loading movies...
@@ -4808,10 +3585,7 @@ GENRES
 
 </div>
 
-<div
-    id="genres"
-    class="chips"
-></div>
+<div id="genres" class="chips"></div>
 
 </section>
 
@@ -4822,6 +3596,28 @@ GENRES
 
 </main>
 
+<div id="splash" class="splash">
+    <div class="splash-card">
+        <div class="splash-logo">MOVIE <span>MYANMAR</span></div>
+        <div class="splash-sub">Xiao Yu CyB • Cinema Mini App</div>
+        <div class="spinner"></div>
+        <div id="splashText" class="splash-text">Loading Movie Myanmar...</div>
+    </div>
+</div>
+
+<div id="gate" class="splash" style="display:none">
+    <div class="splash-card">
+        <div class="splash-logo">MOVIE <span>MYANMAR</span></div>
+        <div class="splash-sub">Xiao Yu CyB • Cinema Mini App</div>
+        <div id="gateText" class="splash-text" style="margin-top:18px">
+            Channel ကို Join ပြီးမှ Movie Myanmar သုံးလို့ရမယ်နော် 😝
+        </div>
+        <div class="gate-buttons">
+            <button onclick="joinChannel()">🎬 Join Movie Myanmar</button>
+            <button class="secondary" onclick="checkAccess()">✅ I Joined</button>
+        </div>
+    </div>
+</div>
 
 <div
     id="overlay"
@@ -4836,41 +3632,26 @@ GENRES
 
 </div>
 
-
 <script>
 
-const tg =
-    window.Telegram?.WebApp;
+const tg = window.Telegram?.WebApp;
 
 if(tg){
-
     tg.ready();
     tg.expand();
-
-    try{
-        tg.setHeaderColor('#07070d');
-        tg.setBackgroundColor('#07070d');
-    }catch(e){}
 }
 
-const $ =
-    id => document.getElementById(id);
+const $ = id => document.getElementById(id);
+
+const MAIN_CHANNEL_URL = 'https://t.me/moviemyanmar567';
 
 let movies = [];
-let authorized = false;
 let booting = false;
-
-
-/* ==========================================================
-   ESCAPE
-   ========================================================== */
+let accessTimer = null;
 
 function esc(s){
-
-    return String(
-        s || ''
-    ).replace(
-        /[&<>"]/g,
+    return String(s || '').replace(
+        /[&<>\"]/g,
         m => ({
             '&':'&amp;',
             '<':'&lt;',
@@ -4880,805 +3661,347 @@ function esc(s){
     );
 }
 
-
-/* ==========================================================
-   TELEGRAM INIT DATA
-   ========================================================== */
-
-function telegramInitData(){
-
-    if(
-        tg &&
-        typeof tg.initData === 'string'
-    ){
-        return tg.initData;
-    }
-
-    return '';
+function sleep(ms){
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function showSplash(text){
+    $('gate').style.display = 'none';
+    $('appRoot').style.display = 'none';
+    $('splash').style.display = 'flex';
+    $('splashText').textContent = text || 'Loading Movie Myanmar...';
+}
 
-/* ==========================================================
-   CARD
-   ========================================================== */
+function showGate(text){
+    $('appRoot').style.display = 'none';
+    $('splash').style.display = 'none';
+    $('gate').style.display = 'flex';
+    $('gateText').textContent = text || 'Channel ကို Join ပြီးမှ Movie Myanmar သုံးလို့ရမယ်နော် 😝';
+}
+
+function unlockApp(){
+    $('splash').style.display = 'none';
+    $('gate').style.display = 'none';
+    $('appRoot').style.display = 'block';
+}
+
+function lockApp(text){
+    if(accessTimer){
+        clearInterval(accessTimer);
+        accessTimer = null;
+    }
+    closeModal();
+    showGate(text || 'Channel ကို Join ပြီးမှ Movie Myanmar သုံးလို့ရမယ်နော် 😝');
+}
+
+function posterUrl(id){
+    const initData = tg?.initData || '';
+    return '/api/poster?id=' +
+        encodeURIComponent(id) +
+        '&initData=' +
+        encodeURIComponent(initData);
+}
+
+async function api(url, options={}){
+    try{
+        const headers = Object.assign({}, options.headers || {});
+        if(tg?.initData){
+            headers['X-Telegram-Init-Data'] = tg.initData;
+        }
+
+        const response = await fetch(
+            url,
+            Object.assign({}, options, {
+                cache:'no-store',
+                headers:headers
+            })
+        );
+
+        const data = await response.json().catch(() => ({}));
+
+        if(response.status === 401 || response.status === 403){
+            if(data.reason === 'not_member'){
+                lockApp(data.message);
+            }
+        }
+
+        if(!response.ok){
+            return Object.assign({}, data, {
+                __error:true,
+                __status:response.status
+            });
+        }
+
+        return data;
+
+    }catch(error){
+        console.error(error);
+        return {
+            __error:true,
+            __network:true
+        };
+    }
+}
 
 function card(m){
-
-    const poster =
-        m.poster
-        ? '/api/poster?id=' +
-          encodeURIComponent(m.id)
-        : '';
+    const poster = m.poster ? posterUrl(m.id) : '';
 
     return `
     <article
         class="card"
         onclick="detail('${encodeURIComponent(m.id)}')"
     >
-
         ${
             poster
-            ? `<img
-                class="poster"
-                src="${poster}"
-                onerror="this.style.visibility='hidden'"
-            >`
+            ? `<img class="poster" src="${poster}" onerror="this.style.visibility='hidden'">`
             : `<div class="poster"></div>`
         }
-
         <div class="ct">
-
-            <div class="title">
-                ${esc(m.title)}
-            </div>
-
+            <div class="title">${esc(m.title)}</div>
             <div class="meta">
                 ${esc(m.year || '')}
                 ${m.quality ? ' • ' + esc(m.quality) : ''}
             </div>
-
         </div>
-
     </article>
     `;
 }
 
+async function loadLatest(){
+    $('rail').innerHTML = '<div class="loader">Loading movies...</div>';
 
-/* ==========================================================
-   API
-   ========================================================== */
+    const data = await api('/api/latest?limit=20');
 
-async function api(
-    url,
-    options={}
-){
-
-    const headers =
-        Object.assign(
-            {},
-            options.headers || {}
-        );
-
-    const initData =
-        telegramInitData();
-
-    if(initData){
-
-        headers[
-            'X-Telegram-Init-Data'
-        ] = initData;
-
+    if(data.__error){
+        return false;
     }
 
-    try{
+    movies = data.movies || [];
 
-        const response =
-            await fetch(
-                url,
-                {
-                    ...options,
-                    headers,
-                    cache:'no-store'
-                }
-            );
-
-        if(
-            response.status === 401
-            || response.status === 403
-        ){
-
-            authorized = false;
-
-            const data =
-                await response
-                    .json()
-                    .catch(
-                        () => ({})
-                    );
-
-            showGateError(
-                data.message
-                || 'Movie Myanmar ကို Join လုပ်ပြီးမှ သုံးလို့ရမယ်နော်။'
-            );
-
-            return {
-                __auth_error:true
-            };
-        }
-
-        if(!response.ok){
-
-            return {
-                __server_error:true,
-                status:response.status
-            };
-        }
-
-        const data =
-            await response.json();
-
-        authorized = true;
-
-        return data;
-
-    }catch(error){
-
-        console.error(
-            'API error:',
-            error
-        );
-
-        return {
-            __network_error:true
-        };
-    }
-}
-
-
-/* ==========================================================
-   GATE ERROR
-   ========================================================== */
-
-function showGateError(
-    message
-){
-
-    $('mainApp').style.display =
-        'none';
-
-    $('splash').classList.remove(
-        'hide'
-    );
-
-    $('spinner').style.display =
-        'none';
-
-    $('retryBtn').style.display =
-        'none';
-
-    $('splashText').textContent =
-        '🔒 Movie Myanmar Join လုပ်ပါ';
-
-    $('splashSmall').textContent =
-        message;
-
-    setTimeout(
-        () => {
-
-            if(tg){
-
-                try{
-                    tg.close();
-                }catch(e){}
-
-            }
-
-        },
-        1800
-    );
-}
-
-
-/* ==========================================================
-   WAKE / RETRY
-   ========================================================== */
-
-function setSplash(
-    text,
-    small
-){
-
-    $('splashText').textContent =
-        text;
-
-    $('splashSmall').textContent =
-        small;
-
-    $('spinner').style.display =
-        'block';
-
-    $('retryBtn').style.display =
-        'none';
-}
-
-
-async function boot(
-    manual=false
-){
-
-    if(booting){
-        return;
-    }
-
-    booting = true;
-
-    $('mainApp').style.display =
-        'none';
-
-    $('splash').classList.remove(
-        'hide'
-    );
-
-    setSplash(
-        manual
-        ? 'Waking Movie Myanmar...'
-        : 'Loading Movie Myanmar...',
-        'Movie database ကို ပြန်စစ်နေပါတယ်။'
-    );
-
-    const initData =
-        telegramInitData();
-
-    if(!initData){
-
-        booting = false;
-
-        $('spinner').style.display =
-            'none';
-
-        $('retryBtn').style.display =
-            'none';
-
-        $('splashText').textContent =
-            '📱 Telegram App ထဲကနေ ဖွင့်ပါ';
-
-        $('splashSmall').textContent =
-            'Movie Myanmar Mini App ကို Telegram ထဲကနေ ဖွင့်မှ Join Gate စစ်နိုင်ပါတယ်။';
-
-        return;
-    }
-
-    let latestData = null;
-
-    for(
-        let attempt = 1;
-        attempt <= ${MINI_APP_RETRIES};
-        attempt++
-    ){
-
-        if(
-            attempt > 1
-        ){
-
-            setSplash(
-                'Movie Myanmar is waking up...',
-                'Render server နိုးလာဖို့ ခဏစောင့်နေပါတယ်။ '
-                + attempt
-                + '/'
-                + ${MINI_APP_RETRIES}
-            );
-
-            await new Promise(
-                resolve =>
-                    setTimeout(
-                        resolve,
-                        ${MINI_APP_RETRY_DELAY}
-                    )
-            );
-        }
-
-        const data =
-            await api(
-                '/api/latest?limit=20'
-            );
-
-        if(
-            data.movies
-            && Array.isArray(
-                data.movies
-            )
-        ){
-
-            latestData = data;
-            break;
-        }
-
-        if(
-            data.__auth_error
-        ){
-
-            booting = false;
-            return;
-        }
-    }
-
-    if(
-        !latestData
-        || !Array.isArray(
-            latestData.movies
-        )
-    ){
-
-        booting = false;
-
-        $('spinner').style.display =
-            'none';
-
-        $('retryBtn').style.display =
-            'inline-block';
-
-        $('splashText').textContent =
-            '😴 Movie Myanmar နိုးမလာသေးဘူး';
-
-        $('splashSmall').textContent =
-            'Server wake-up ကြောင့် ခဏကြာနိုင်ပါတယ်။ '
-            + 'Retry နှိပ်ပြီး ထပ်စမ်းပါ။';
-
-        return;
-    }
-
-    movies =
-        latestData.movies;
-
-    $('rail').innerHTML =
-        movies.length
+    $('rail').innerHTML = movies.length
         ? movies.map(card).join('')
         : '<div class="empty">No movies yet</div>';
 
-    await showGenres(
-        true
-    );
-
-    $('mainApp').style.display =
-        'block';
-
-    booting = false;
-
-    $('splash').classList.add(
-        'hide'
-    );
-
-    setTimeout(
-        () => {
-            $('splash').style.display =
-                'none';
-        },
-        400
-    );
+    return true;
 }
-
-
-/* ==========================================================
-   LATEST
-   ========================================================== */
-
-async function loadLatest(){
-
-    $('rail').innerHTML =
-        '<div class="loader">Loading movies...</div>';
-
-    const data =
-        await api(
-            '/api/latest?limit=20'
-        );
-
-    if(
-        data.__auth_error
-    ){
-        return;
-    }
-
-    if(
-        data.movies
-        && Array.isArray(
-            data.movies
-        )
-    ){
-
-        movies =
-            data.movies;
-
-        $('rail').innerHTML =
-            movies.length
-            ? movies.map(card).join('')
-            : '<div class="empty">No movies yet</div>';
-
-        return;
-    }
-
-    $('rail').innerHTML =
-        '<div class="loader">Movie Myanmar is waking up... 🔄</div>';
-
-    setTimeout(
-        loadLatest,
-        1800
-    );
-}
-
-
-/* ==========================================================
-   SEARCH
-   ========================================================== */
 
 async function searchMovies(){
+    const query = $('q').value.trim();
+    if(!query) return;
 
-    const query =
-        $('q').value.trim();
+    const data = await api(
+        '/api/search?q=' + encodeURIComponent(query)
+    );
 
-    if(!query){
-        return;
-    }
+    if(data.__error) return;
 
-    const data =
-        await api(
-            '/api/search?q=' +
-            encodeURIComponent(query)
-        );
-
-    if(
-        data.__auth_error
-    ){
-        return;
-    }
-
-    if(
-        data.movies
-        && Array.isArray(
-            data.movies
-        )
-    ){
-
-        renderResults(
-            'SEARCH RESULTS',
-            data.movies
-        );
-
-    }else{
-
-        renderResults(
-            'SEARCH RESULTS',
-            []
-        );
-
-    }
+    renderResults('SEARCH RESULTS', data.movies || []);
 }
 
-
-function renderResults(
-    title,
-    arr
-){
-
+function renderResults(title, arr){
     $('results').innerHTML = `
-
         <div class="sectionhead">
-
-            <h2>
-                ${esc(title)}
-            </h2>
-
-            <span class="muted">
-                ${arr.length} found
-            </span>
-
+            <h2>${esc(title)}</h2>
+            <span class="muted">${arr.length} found</span>
         </div>
-
         <div class="rail">
-
             ${
                 arr.length
                 ? arr.map(card).join('')
                 : '<div class="empty">Not found 😒</div>'
             }
-
         </div>
     `;
 }
 
+async function showGenres(){
+    const data = await api('/api/genres');
 
-/* ==========================================================
-   GENRES
-   ========================================================== */
-
-async function showGenres(
-    silent=false
-){
-
-    const data =
-        await api(
-            '/api/genres'
-        );
-
-    if(
-        data.__auth_error
-    ){
-        return;
+    if(data.__error){
+        return false;
     }
 
-    $('genres').innerHTML =
-        (data.genres || [])
-        .map(
-            genre => `
+    $('genres').innerHTML = (data.genres || [])
+        .map(genre => `
             <button
                 class="chip"
                 onclick="genre('${encodeURIComponent(genre)}', this)"
-            >
-                ${esc(genre)}
-            </button>
-            `
-        )
+            >${esc(genre)}</button>
+        `)
         .join('');
 
-    if(!silent){
-
-        $('genres').scrollIntoView({
-            behavior:'smooth',
-            block:'center'
-        });
-
-    }
+    return true;
 }
 
+async function genre(encodedGenre, button){
+    document.querySelectorAll('.chip').forEach(
+        x => x.classList.remove('active')
+    );
 
-async function genre(
-    encodedGenre,
-    button
-){
+    if(button) button.classList.add('active');
 
-    document
-        .querySelectorAll(
-            '.chip'
-        )
-        .forEach(
-            x =>
-                x.classList.remove(
-                    'active'
-                )
-        );
+    const data = await api(
+        '/api/genre?name=' + encodedGenre
+    );
 
-    if(button){
-
-        button.classList.add(
-            'active'
-        );
-    }
-
-    const data =
-        await api(
-            '/api/genre?name=' +
-            encodedGenre
-        );
-
-    if(
-        data.__auth_error
-    ){
-        return;
-    }
+    if(data.__error) return;
 
     renderResults(
-        '🎭 ' +
-        decodeURIComponent(
-            encodedGenre
-        ),
+        '🎭 ' + decodeURIComponent(encodedGenre),
         data.movies || []
     );
 }
 
+async function detail(encodedId){
+    const movieId = decodeURIComponent(encodedId);
 
-/* ==========================================================
-   DETAIL
-   ========================================================== */
+    const data = await api(
+        '/api/movie?id=' + encodeURIComponent(movieId)
+    );
 
-async function detail(
-    encodedId
-){
+    if(data.__error || !data.title) return;
 
-    const movieId =
-        decodeURIComponent(
-            encodedId
-        );
-
-    const data =
-        await api(
-            '/api/movie?id=' +
-            encodeURIComponent(
-                movieId
-            )
-        );
-
-    if(
-        data.__auth_error
-    ){
-        return;
-    }
-
-    if(!data.title){
-        return;
-    }
-
-    const poster =
-        data.poster
-        ? '/api/poster?id=' +
-          encodeURIComponent(
-              data.id
-          )
-        : '';
+    const poster = data.poster ? posterUrl(data.id) : '';
 
     $('modal').innerHTML = `
-
-        <button
-            class="close"
-            onclick="closeModal()"
-        >
-            ✕
-        </button>
-
-        ${
-            poster
-            ? `<img src="${poster}" alt="">`
-            : ''
-        }
-
+        <button class="close" onclick="closeModal()">✕</button>
+        ${poster ? `<img src="${poster}" alt="">` : ''}
         <div class="mb">
-
-            <h2>
-                ${esc(data.title)}
-            </h2>
-
+            <h2>${esc(data.title)}</h2>
             <div class="meta">
                 ${esc(data.year || '')}
                 ${data.quality ? ' • ' + esc(data.quality) : ''}
                 ${data.audio ? ' • ' + esc(data.audio) : ''}
             </div>
-
-            <p>
-                ${esc(
-                    data.description
-                    || 'Movie Myanmar'
-                )}
-            </p>
-
+            <p>${esc(data.description || 'Movie Myanmar')}</p>
             ${
                 data.link
-                ? `
-                <a
-                    href="${esc(data.link)}"
-                    target="_blank"
-                    rel="noopener"
-                >
-                    <button class="open">
-                        🎬 Open Movie
-                    </button>
-                </a>
-                `
+                ? `<a href="${esc(data.link)}" target="_blank" rel="noopener"><button class="open">🎬 Open Movie</button></a>`
                 : ''
             }
-
         </div>
     `;
 
-    $('overlay').style.display =
-        'flex';
+    $('overlay').style.display = 'flex';
 }
-
 
 function closeModal(){
-
-    $('overlay').style.display =
-        'none';
+    $('overlay').style.display = 'none';
 }
-
-
-/* ==========================================================
-   AI
-   ========================================================== */
 
 function openAi(){
-
-    if(
-        !authorized
-    ){
-
-        boot(true);
-        return;
-    }
-
-    if(
-        tg &&
-        typeof tg.sendData ===
-            'function'
-    ){
-
-        tg.sendData(
-            'ai'
-        );
-
-        setTimeout(
-            () => {
-
-                try{
-                    tg.close();
-                }catch(e){}
-
-            },
-            150
-        );
-
+    if(tg && typeof tg.sendData === 'function'){
+        tg.sendData('ai');
+        setTimeout(() => tg.close(), 150);
     }else{
-
-        alert(
-            'Open Xiao Yu AI from the Telegram bot menu 😝'
-        );
-
+        alert('Open Xiao Yu AI from the Telegram bot menu 😝');
     }
 }
 
+function joinChannel(){
+    try{
+        if(tg && typeof tg.openTelegramLink === 'function'){
+            tg.openTelegramLink(MAIN_CHANNEL_URL);
+        }else{
+            window.open(MAIN_CHANNEL_URL, '_blank');
+        }
+    }catch(e){
+        window.open(MAIN_CHANNEL_URL, '_blank');
+    }
+}
 
-/* ==========================================================
-   SEARCH ENTER
-   ========================================================== */
+async function checkAccess(){
+    await boot(true);
+}
 
-$('q').addEventListener(
-    'keydown',
-    e => {
+function startAccessWatch(){
+    if(accessTimer) clearInterval(accessTimer);
 
-        if(
-            e.key === 'Enter'
-        ){
+    accessTimer = setInterval(async () => {
+        const auth = await api('/api/auth');
+        if(auth.__error) return;
+        if(!auth.authorized){
+            lockApp(
+                auth.message ||
+                'Channel ကို Join ပြီးမှ Movie Myanmar သုံးလို့ရမယ်နော် 😝'
+            );
+        }
+    }, 20000);
+}
 
-            searchMovies();
+async function boot(force=false){
+    if(booting && !force) return;
+    booting = true;
 
+    try{
+        if(!tg || !tg.initData){
+            showGate('Telegram ထဲကနေ Movie Myanmar App ကို ဖွင့်ပါ။');
+            return;
         }
 
+        showSplash('Loading Movie Myanmar...');
+
+        // Keep retrying instead of ever displaying "No movies yet" while
+        // Render is still waking or the data endpoint is temporarily busy.
+        while(true){
+            const auth = await api('/api/auth');
+
+            if(auth.authorized){
+                showSplash('Movie Myanmar is waking up...');
+
+                const latestOk = await loadLatest();
+                const genresOk = await showGenres();
+
+                if(latestOk && genresOk){
+                    unlockApp();
+                    startAccessWatch();
+                    return;
+                }
+
+                showSplash('Movie Myanmar is waking up... Please wait...');
+                await sleep(2500);
+                continue;
+            }
+
+            if(auth.reason === 'not_member'){
+                showGate(
+                    auth.message ||
+                    'Channel ကို Join ပြီးမှ Movie Myanmar သုံးလို့ရမယ်နော် 😝'
+                );
+                return;
+            }
+
+            if(auth.reason === 'invalid_init_data'){
+                showGate('Telegram ထဲကနေ Movie Myanmar App ကို ပြန်ဖွင့်ပါ။');
+                return;
+            }
+
+            showSplash('Movie Myanmar is waking up...');
+            await sleep(2500);
+        }
+    }finally{
+        booting = false;
     }
-);
+}
 
+$('q').addEventListener('keydown', e => {
+    if(e.key === 'Enter') searchMovies();
+});
 
-/* ==========================================================
-   START
-   ========================================================== */
-
-boot(false);
-
+boot();
 </script>
 
 </body>
 </html>
 '''
 
-# Replace template placeholders in the HTML with numeric JS values.
-MINI_APP_HTML = (
-    MINI_APP_HTML
-    .replace(
-        "${MINI_APP_RETRIES}",
-        str(MINI_APP_RETRIES),
-    )
-    .replace(
-        "${MINI_APP_RETRY_DELAY}",
-        str(MINI_APP_RETRY_DELAY),
-    )
-)
-
 
 # ============================================================
-# MINI APP SERIALIZER
+# MINI APP MOVIE SERIALIZER
 # ============================================================
 
 def mini_movie(movie):
-
-    ensure_movie_id(
-        movie
-    )
+    ensure_movie_id(movie)
 
     return {
         "id": str(
@@ -5726,10 +4049,7 @@ def mini_movie(movie):
 # POSTER
 # ============================================================
 
-def get_poster_bytes(
-    movie_id
-):
-
+def get_poster_bytes(movie_id):
     movie = find_movie_by_id(
         movie_id
     )
@@ -5749,12 +4069,9 @@ def get_poster_bytes(
         return None, "image/jpeg"
 
     if file_id in poster_cache:
-        return poster_cache[
-            file_id
-        ]
+        return poster_cache[file_id]
 
     try:
-
         request = Request(
             (
                 "https://api.telegram.org/bot"
@@ -5777,13 +4094,8 @@ def get_poster_bytes(
 
         path = (
             data
-            .get(
-                "result",
-                {},
-            )
-            .get(
-                "file_path"
-            )
+            .get("result", {})
+            .get("file_path")
         )
 
         if not path:
@@ -5799,57 +4111,78 @@ def get_poster_bytes(
             timeout=20,
         ).read()
 
-        content_type = (
-            "image/jpeg"
-        )
+        content_type = "image/jpeg"
 
-        lower_path = (
-            path.lower()
-        )
+        lower_path = path.lower()
 
         if lower_path.endswith(
             ".png"
         ):
-
-            content_type = (
-                "image/png"
-            )
+            content_type = "image/png"
 
         elif lower_path.endswith(
             ".webp"
         ):
-
-            content_type = (
-                "image/webp"
-            )
+            content_type = "image/webp"
 
         elif lower_path.endswith(
             ".gif"
         ):
+            content_type = "image/gif"
 
-            content_type = (
-                "image/gif"
-            )
-
-        poster_cache[
-            file_id
-        ] = (
+        poster_cache[file_id] = (
             raw,
             content_type,
         )
 
-        return poster_cache[
-            file_id
-        ]
+        return poster_cache[file_id]
 
     except Exception as e:
-
         print(
             "poster error:",
             e,
         )
 
         return None, "image/jpeg"
+
+
+# ============================================================
+# MINI APP AUTH / MEMBERSHIP GATE
+# ============================================================
+
+# The HTML shell at /app is public, but every data endpoint is protected
+# by Telegram's signed initData plus a live membership check. This prevents
+# non-members from using Search / Latest / Genres / movie links / posters.
+
+def webapp_auth_response(headers, qs):
+    allowed, uid, reason = authorize_webapp_request(
+        headers,
+        qs,
+    )
+
+    if allowed:
+        return {
+            "ok": True,
+            "authorized": True,
+            "admin": bool(is_admin_user(uid)),
+            "user_id": uid,
+        }, 200
+
+    if reason == "not_member":
+        return {
+            "ok": False,
+            "authorized": False,
+            "reason": reason,
+            "message": "Movie Myanmar Channel ကို Join လုပ်ပြီးမှ သုံးလို့ရမယ်နော် 😝",
+            "join_url": MAIN_CHANNEL_URL,
+        }, 403
+
+    return {
+        "ok": False,
+        "authorized": False,
+        "reason": reason,
+        "message": "Telegram Mini App session မမှန်ပါ။ Telegram ထဲကနေ ပြန်ဖွင့်ပါ။",
+    }, 401
 
 
 # ============================================================
@@ -5872,7 +4205,6 @@ class HealthHandler(
         content_type="text/plain; charset=utf-8",
         status=200,
     ):
-
         self.send_response(
             status
         )
@@ -5884,12 +4216,7 @@ class HealthHandler(
 
         self.send_header(
             "Cache-Control",
-            "no-store, no-cache, must-revalidate"
-        )
-
-        self.send_header(
-            "Pragma",
-            "no-cache",
+            "no-store",
         )
 
         self.send_header(
@@ -5899,51 +4226,27 @@ class HealthHandler(
 
         self.end_headers()
 
-        try:
-
-            self.wfile.write(
-                data
-            )
-
-        except Exception:
-            pass
+        self.wfile.write(
+            data
+        )
 
     def send_json(
         self,
         obj,
         status=200,
     ):
-
         self.send_bytes(
             json.dumps(
                 obj,
                 ensure_ascii=False,
-            ).encode(
-                "utf-8"
-            ),
+            ).encode("utf-8"),
             "application/json; charset=utf-8",
             status,
-        )
-
-    def send_api_gate_error(
-        self,
-        message,
-        status=403,
-    ):
-
-        self.send_json(
-            {
-                "ok": False,
-                "authorized": False,
-                "message": message,
-            },
-            status=status,
         )
 
     def do_GET(self):
 
         try:
-
             parsed = urlparse(
                 self.path
             )
@@ -5955,6 +4258,38 @@ class HealthHandler(
             )
 
             # ------------------------------------------------
+            # MINI APP AUTH
+            # ------------------------------------------------
+
+            if path == "/api/auth":
+                payload, status_code = webapp_auth_response(
+                    self.headers,
+                    qs,
+                )
+                return self.send_json(
+                    payload,
+                    status_code,
+                )
+
+            # Every other /api/* route requires valid Telegram initData
+            # and a live membership check.
+            if path.startswith("/api/"):
+                allowed, uid, reason = authorize_webapp_request(
+                    self.headers,
+                    qs,
+                )
+
+                if not allowed:
+                    payload, status_code = webapp_auth_response(
+                        self.headers,
+                        qs,
+                    )
+                    return self.send_json(
+                        payload,
+                        status_code,
+                    )
+
+            # ------------------------------------------------
             # HEALTH
             # ------------------------------------------------
 
@@ -5962,25 +4297,18 @@ class HealthHandler(
                 "/",
                 "/health",
             ):
-
                 return self.send_bytes(
                     b"Movie Myanmar Bot is alive"
                 )
 
             # ------------------------------------------------
-            # MINI APP PAGE
-            # ------------------------------------------------
-            # The HTML itself can be loaded by Telegram WebApp.
-            # Protected movie data is NOT exposed here.
-            # Every /api/* request requires verified Telegram
-            # initData + current membership.
+            # MINI APP
             # ------------------------------------------------
 
             if path in (
                 "/app",
                 "/miniapp",
             ):
-
                 return self.send_bytes(
                     MINI_APP_HTML.encode(
                         "utf-8"
@@ -5989,247 +4317,171 @@ class HealthHandler(
                 )
 
             # ------------------------------------------------
-            # PROTECTED MINI APP API
+            # ALL / LATEST MOVIES
             # ------------------------------------------------
 
-            if path.startswith(
-                "/api/"
+            if path in (
+                "/api/movies",
+                "/api/latest",
             ):
+                try:
+                    limit = int(
+                        qs.get(
+                            "limit",
+                            ["20"],
+                        )[0]
+                    )
+                except Exception:
+                    limit = 20
 
-                authorized, user, error_message = (
-                    mini_app_authorize(
-                        self
+                limit = max(
+                    1,
+                    min(
+                        limit,
+                        50,
+                    ),
+                )
+
+                movies = latest(
+                    limit
+                )
+
+                return self.send_json(
+                    {
+                        "movies": [
+                            mini_movie(movie)
+                            for movie in movies
+                        ],
+                        "count": len(
+                            movies
+                        ),
+                        "total": len(
+                            movie_database
+                        ),
+                    }
+                )
+
+            # ------------------------------------------------
+            # SEARCH
+            # ------------------------------------------------
+
+            if path == "/api/search":
+                query = qs.get(
+                    "q",
+                    [""],
+                )[0]
+
+                results = movie_search(
+                    query
+                )[:30]
+
+                return self.send_json(
+                    {
+                        "movies": [
+                            mini_movie(movie)
+                            for movie in results
+                        ],
+                        "count": len(
+                            results
+                        ),
+                    }
+                )
+
+            # ------------------------------------------------
+            # GENRES
+            # ------------------------------------------------
+
+            if path == "/api/genres":
+                return self.send_json(
+                    {
+                        "genres": list(
+                            GENRE_KEYWORDS.keys()
+                        )
+                    }
+                )
+
+            # ------------------------------------------------
+            # GENRE MOVIES
+            # ------------------------------------------------
+
+            if path == "/api/genre":
+                genre = qs.get(
+                    "name",
+                    [""],
+                )[0]
+
+                if genre == "All":
+                    results = latest(
+                        50
+                    )
+
+                else:
+                    with movie_lock:
+                        results = [
+                            movie
+                            for movie
+                            in reversed(
+                                movie_database
+                            )
+                            if genre
+                            in movie.get(
+                                "genres",
+                                [],
+                            )
+                        ][:50]
+
+                return self.send_json(
+                    {
+                        "movies": [
+                            mini_movie(movie)
+                            for movie in results
+                        ],
+                        "count": len(
+                            results
+                        ),
+                    }
+                )
+
+            # ------------------------------------------------
+            # SINGLE MOVIE
+            # ------------------------------------------------
+
+            if path == "/api/movie":
+                movie_id = qs.get(
+                    "id",
+                    [""],
+                )[0]
+
+                movie = find_movie_by_id(
+                    movie_id
+                )
+
+                return self.send_json(
+                    mini_movie(movie)
+                    if movie
+                    else {}
+                )
+
+            # ------------------------------------------------
+            # POSTER
+            # ------------------------------------------------
+
+            if path == "/api/poster":
+                movie_id = qs.get(
+                    "id",
+                    [""],
+                )[0]
+
+                raw, content_type = (
+                    get_poster_bytes(
+                        movie_id
                     )
                 )
 
-                if not authorized:
-
-                    return self.send_api_gate_error(
-                        error_message
-                        or "Access denied.",
-                        401,
-                    )
-
-                # ------------------------------------------------
-                # LATEST / ALL
-                # ------------------------------------------------
-
-                if path in (
-                    "/api/movies",
-                    "/api/latest",
-                ):
-
-                    try:
-
-                        limit = int(
-                            qs.get(
-                                "limit",
-                                ["20"],
-                            )[0]
-                        )
-
-                    except Exception:
-                        limit = 20
-
-                    limit = max(
-                        1,
-                        min(
-                            limit,
-                            50,
-                        ),
-                    )
-
-                    movies = latest(
-                        limit
-                    )
-
-                    return self.send_json(
-                        {
-                            "ok": True,
-                            "authorized": True,
-                            "movies": [
-                                mini_movie(
-                                    movie
-                                )
-                                for movie
-                                in movies
-                            ],
-                            "count": len(
-                                movies
-                            ),
-                            "total": len(
-                                movie_database
-                            ),
-                        }
-                    )
-
-                # ------------------------------------------------
-                # SEARCH
-                # ------------------------------------------------
-
-                if path == "/api/search":
-
-                    query = qs.get(
-                        "q",
-                        [""],
-                    )[0]
-
-                    results = (
-                        movie_search(
-                            query
-                        )[:30]
-                    )
-
-                    return self.send_json(
-                        {
-                            "ok": True,
-                            "authorized": True,
-                            "movies": [
-                                mini_movie(
-                                    movie
-                                )
-                                for movie
-                                in results
-                            ],
-                            "count": len(
-                                results
-                            ),
-                        }
-                    )
-
-                # ------------------------------------------------
-                # GENRES
-                # ------------------------------------------------
-
-                if path == "/api/genres":
-
-                    return self.send_json(
-                        {
-                            "ok": True,
-                            "authorized": True,
-                            "genres": list(
-                                GENRE_KEYWORDS.keys()
-                            ),
-                        }
-                    )
-
-                # ------------------------------------------------
-                # GENRE
-                # ------------------------------------------------
-
-                if path == "/api/genre":
-
-                    genre = qs.get(
-                        "name",
-                        [""],
-                    )[0]
-
-                    if genre == "All":
-
-                        results = latest(
-                            50
-                        )
-
-                    else:
-
-                        with movie_lock:
-
-                            results = [
-                                movie
-                                for movie
-                                in reversed(
-                                    movie_database
-                                )
-                                if genre
-                                in movie.get(
-                                    "genres",
-                                    [],
-                                )
-                            ][:50]
-
-                    return self.send_json(
-                        {
-                            "ok": True,
-                            "authorized": True,
-                            "movies": [
-                                mini_movie(
-                                    movie
-                                )
-                                for movie
-                                in results
-                            ],
-                            "count": len(
-                                results
-                            ),
-                        }
-                    )
-
-                # ------------------------------------------------
-                # SINGLE MOVIE
-                # ------------------------------------------------
-
-                if path == "/api/movie":
-
-                    movie_id = qs.get(
-                        "id",
-                        [""],
-                    )[0]
-
-                    movie = find_movie_by_id(
-                        movie_id
-                    )
-
-                    return self.send_json(
-                        (
-                            {
-                                "ok": True,
-                                "authorized": True,
-                                **mini_movie(
-                                    movie
-                                ),
-                            }
-                            if movie
-                            else {
-                                "ok": True,
-                                "authorized": True,
-                            }
-                        )
-                    )
-
-                # ------------------------------------------------
-                # POSTER
-                # ------------------------------------------------
-
-                if path == "/api/poster":
-
-                    movie_id = qs.get(
-                        "id",
-                        [""],
-                    )[0]
-
-                    raw, content_type = (
-                        get_poster_bytes(
-                            movie_id
-                        )
-                    )
-
-                    if not raw:
-
-                        return self.send_bytes(
-                            b"Poster not found",
-                            "text/plain; charset=utf-8",
-                            404,
-                        )
-
-                    return self.send_bytes(
-                        raw,
-                        content_type,
-                        200,
-                    )
-
                 return self.send_bytes(
-                    b"Not Found",
-                    status=404,
+                    raw or b"",
+                    content_type,
+                    200 if raw else 404,
                 )
 
             return self.send_bytes(
@@ -6238,7 +4490,6 @@ class HealthHandler(
             )
 
         except Exception:
-
             print(
                 "GET error:"
             )
@@ -6248,12 +4499,10 @@ class HealthHandler(
             )
 
             try:
-
                 return self.send_bytes(
                     b"Server error",
                     status=500,
                 )
-
             except Exception:
                 return None
 
@@ -6263,13 +4512,12 @@ class HealthHandler(
         global webhook_loop
 
         try:
-
-            path = urlparse(
-                self.path
-            ).path
-
-            if path != WEBHOOK_PATH:
-
+            if (
+                urlparse(
+                    self.path
+                ).path
+                != WEBHOOK_PATH
+            ):
                 return self.send_bytes(
                     b"Not Found",
                     status=404,
@@ -6281,7 +4529,6 @@ class HealthHandler(
                 )
                 != WEBHOOK_SECRET
             ):
-
                 return self.send_bytes(
                     b"Forbidden",
                     status=403,
@@ -6295,7 +4542,6 @@ class HealthHandler(
             )
 
             if length <= 0:
-
                 return self.send_bytes(
                     b"Bad Request",
                     status=400,
@@ -6312,7 +4558,6 @@ class HealthHandler(
             )
 
             if not webhook_application:
-
                 return self.send_bytes(
                     b"Bot not ready",
                     status=503,
@@ -6328,7 +4573,6 @@ class HealthHandler(
                 and webhook_loop
                 and webhook_application
             ):
-
                 asyncio.run_coroutine_threadsafe(
                     webhook_application
                     .update_queue
@@ -6341,7 +4585,6 @@ class HealthHandler(
             )
 
         except Exception:
-
             print(
                 "POST error:"
             )
@@ -6351,12 +4594,10 @@ class HealthHandler(
             )
 
             try:
-
                 return self.send_bytes(
                     b"Bad Request",
                     status=400,
                 )
-
             except Exception:
                 return None
 
@@ -6366,9 +4607,7 @@ class HealthHandler(
 # ============================================================
 
 def start_health_server():
-
     try:
-
         server = HTTPServer(
             (
                 "0.0.0.0",
@@ -6385,7 +4624,6 @@ def start_health_server():
         server.serve_forever()
 
     except Exception as e:
-
         print(
             "HTTP server error:",
             e,
@@ -6400,20 +4638,17 @@ async def error_handler(
     update,
     context,
 ):
-
     print(
         "Telegram handler error:",
         context.error,
     )
 
     try:
-
         traceback.print_exception(
             type(context.error),
             context.error,
             context.error.__traceback__,
         )
-
     except Exception:
         pass
 
@@ -6428,10 +4663,19 @@ async def main():
     global webhook_loop
 
     if not BOT_TOKEN:
-
         raise RuntimeError(
             "BOT_TOKEN is missing"
         )
+
+    # Start the HTTP health server immediately. Render expects the
+    # service port to be listening while the Telegram API startup
+    # calls are still running. Starting it first prevents Render from
+    # treating a slow Telegram/network startup as an early exit.
+    threading.Thread(
+        target=start_health_server,
+        daemon=True,
+        name="movie-http-server",
+    ).start()
 
     application = (
         Application
@@ -6478,7 +4722,6 @@ async def main():
     # --------------------------------------------------------
 
     try:
-
         web_app_data_filter = (
             filters.StatusUpdate.WEB_APP_DATA
         )
@@ -6491,7 +4734,6 @@ async def main():
         )
 
     except Exception as e:
-
         print(
             "WebAppData handler skipped:",
             e,
@@ -6525,6 +4767,7 @@ async def main():
         group=0,
     )
 
+    # Telegram may receive large movies as Documents (MKV etc.).
     application.add_handler(
         MessageHandler(
             filters.Document.ALL,
@@ -6573,9 +4816,7 @@ async def main():
         WebAppInfo
         and MenuButtonWebApp
     ):
-
         try:
-
             await application.bot.set_chat_menu_button(
                 menu_button=MenuButtonWebApp(
                     text="🎬 Movie Myanmar",
@@ -6593,21 +4834,10 @@ async def main():
             )
 
         except Exception as e:
-
             print(
                 "menu web app setup skipped:",
                 e,
             )
-
-    # --------------------------------------------------------
-    # HEALTH SERVER
-    # --------------------------------------------------------
-
-    threading.Thread(
-        target=start_health_server,
-        daemon=True,
-        name="movie-http-server",
-    ).start()
 
     # --------------------------------------------------------
     # WEBHOOK
@@ -6657,24 +4887,18 @@ async def main():
 
     print(
         "Movie Storage Chat ID:",
-        get_storage_channel_id()
-        or "(auto-detect pending)",
+        get_storage_channel_id() or "(auto-detect pending)",
     )
 
     print(
         "GitHub Movie Backup:",
-        "ON"
-        if github_enabled()
-        else "OFF (set GITHUB_TOKEN)",
+        "ON" if github_enabled() else "OFF (set GITHUB_TOKEN)",
     )
 
     if github_enabled():
-
         print(
             "GitHub Movie File:",
-            f"{GITHUB_REPO}/"
-            f"{GITHUB_MOVIE_FILE}@"
-            f"{GITHUB_BRANCH}",
+            f"{GITHUB_REPO}/{GITHUB_MOVIE_FILE}@{GITHUB_BRANCH}",
         )
 
     print(
@@ -6688,18 +4912,6 @@ async def main():
     )
 
     print(
-        "Mini App Gate:",
-        "Telegram initData + "
-        "membership verification ON",
-    )
-
-    print(
-        "Mini App Wake Retry:",
-        MINI_APP_RETRIES,
-        "attempts",
-    )
-
-    print(
         "========================================"
     )
 
@@ -6708,7 +4920,6 @@ async def main():
     # --------------------------------------------------------
 
     while True:
-
         await asyncio.sleep(
             3600
         )
@@ -6719,7 +4930,4 @@ async def main():
 # ============================================================
 
 if __name__ == "__main__":
-
-    asyncio.run(
-        main()
-    )
+    asyncio.run(main())

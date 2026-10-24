@@ -130,6 +130,11 @@ AI_USAGE_FILE = os.path.join(
     "ai_usage.json",
 )
 
+ADMIN_STATS_FILE = os.path.join(
+    DATA_DIR,
+    "admin_stats.json",
+)
+
 # Automatically learned private Movie Storage Channel ID.
 # MOVIE_STORAGE_CHAT_ID from Render always takes precedence.
 STORAGE_CHANNEL_FILE = os.path.join(
@@ -407,6 +412,14 @@ poster_cache = {}
 
 movie_lock = threading.RLock()
 ai_lock = threading.RLock()
+stats_lock = threading.RLock()
+
+admin_stats = {
+    "users": {},
+    "searches": 0,
+    "movie_views": {},
+    "ai_requests": 0,
+}
 
 
 # ============================================================
@@ -941,6 +954,86 @@ def save_ai_usage():
     )
 
 
+def load_admin_stats():
+    global admin_stats
+
+    data = load_json(
+        ADMIN_STATS_FILE,
+        {},
+    )
+
+    if not isinstance(data, dict):
+        data = {}
+
+    users = data.get("users", {})
+    movie_views = data.get("movie_views", {})
+
+    admin_stats = {
+        "users": users if isinstance(users, dict) else {},
+        "searches": int(data.get("searches", 0) or 0),
+        "movie_views": movie_views if isinstance(movie_views, dict) else {},
+        "ai_requests": int(data.get("ai_requests", 0) or 0),
+    }
+
+    print(
+        "Loaded admin stats:",
+        len(admin_stats["users"]),
+        "users",
+    )
+
+
+def save_admin_stats():
+    with stats_lock:
+        snapshot = {
+            "users": dict(admin_stats.get("users", {})),
+            "searches": int(admin_stats.get("searches", 0) or 0),
+            "movie_views": dict(admin_stats.get("movie_views", {})),
+            "ai_requests": int(admin_stats.get("ai_requests", 0) or 0),
+        }
+
+    save_json(
+        ADMIN_STATS_FILE,
+        snapshot,
+    )
+
+
+def record_user(uid):
+    key = str(uid or "").strip()
+    if not key:
+        return
+
+    with stats_lock:
+        users = admin_stats.setdefault("users", {})
+        if key in users:
+            return
+        now = int(time.time())
+        users[key] = {
+            "first_seen": now,
+            "last_seen": now,
+        }
+
+    save_admin_stats()
+
+
+def record_search():
+    with stats_lock:
+        admin_stats["searches"] = int(
+            admin_stats.get("searches", 0) or 0
+        ) + 1
+    save_admin_stats()
+
+
+def record_movie_view(movie_id):
+    key = str(movie_id or "").strip()
+    if not key:
+        return
+
+    with stats_lock:
+        views = admin_stats.setdefault("movie_views", {})
+        views[key] = int(views.get(key, 0) or 0) + 1
+    save_admin_stats()
+
+
 def get_ai_usage(uid):
     with ai_lock:
         try:
@@ -960,12 +1053,19 @@ def increase_ai_usage(uid):
             get_ai_usage(uid) + 1
         )
 
+    with stats_lock:
+        admin_stats["ai_requests"] = int(
+            admin_stats.get("ai_requests", 0) or 0
+        ) + 1
+
     save_ai_usage()
+    save_admin_stats()
 
 
 migrate_old_data()
 load_movies()
 load_ai_usage()
+load_admin_stats()
 
 
 # ============================================================
@@ -1185,6 +1285,8 @@ def movie_search(q):
     if not qn:
         return []
 
+    record_search()
+
     year = extract_year(q)
 
     scored = []
@@ -1284,15 +1386,22 @@ def movie_search(q):
     ]
 
 
-def latest(limit=10):
+def latest(limit=None):
     with movie_lock:
-        return list(
-            reversed(
-                movie_database[
-                    -limit:
-                ]
-            )
-        )
+        movies = list(reversed(movie_database))
+
+    if limit is None:
+        return movies
+
+    try:
+        limit = int(limit)
+    except Exception:
+        return movies
+
+    if limit <= 0:
+        return []
+
+    return movies[:limit]
 
 
 # ============================================================
@@ -1331,7 +1440,7 @@ def join_keyboard():
     )
 
 
-def home_keyboard():
+def home_keyboard(user_id=None):
     rows = [
         [
             InlineKeyboardButton(
@@ -1386,6 +1495,21 @@ def home_keyboard():
                 )
             ],
         )
+
+        if is_admin_user(user_id):
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        "🛠 Admin Dashboard",
+                        web_app=WebAppInfo(
+                            url=(
+                                RENDER_URL
+                                + "/admin"
+                            )
+                        ),
+                    )
+                ]
+            )
 
     return InlineKeyboardMarkup(
         rows
@@ -1657,11 +1781,13 @@ def authorize_webapp_request(headers, qs):
         return False, None, "invalid_init_data"
 
     if is_admin_user(uid):
+        record_user(uid)
         return True, uid, "admin"
 
     if not telegram_get_chat_member_sync(uid):
         return False, uid, "not_member"
 
+    record_user(uid)
     return True, uid, "ok"
 
 
@@ -1699,14 +1825,22 @@ async def show_home(
             WELCOME_IMAGE,
             caption=home_caption(),
             parse_mode="HTML",
-            reply_markup=home_keyboard(),
+            reply_markup=home_keyboard(
+                update.effective_user.id
+                if update.effective_user
+                else None
+            ),
         )
 
     except Exception:
         await target.reply_text(
             home_caption(),
             parse_mode="HTML",
-            reply_markup=home_keyboard(),
+            reply_markup=home_keyboard(
+                update.effective_user.id
+                if update.effective_user
+                else None
+            ),
         )
 
 
@@ -1726,6 +1860,8 @@ async def start_command(
             reply_markup=join_keyboard(),
         )
         return
+
+    record_user(uid)
 
     user_search_mode.pop(
         uid,
@@ -2219,6 +2355,8 @@ async def message_handler(
         )
         return
 
+    record_user(uid)
+
     if text.lower() in (
         "home",
         "menu",
@@ -2376,7 +2514,7 @@ async def message_handler(
         "Movie ရှာချင်ရင် <b>Search Movie</b> ကိုနှိပ်၊ "
         "AI ပြောချင်ရင် <b>Xiao Yu AI</b> ကိုနှိပ်နော်။",
         parse_mode="HTML",
-        reply_markup=home_keyboard(),
+        reply_markup=home_keyboard(uid),
     )
 
 
@@ -3770,7 +3908,7 @@ function card(m){
 async function loadLatest(){
     $('rail').innerHTML = '<div class="loader">Loading movies...</div>';
 
-    const data = await api('/api/latest?limit=20');
+    const data = await api('/api/latest');
 
     if(data.__error){
         return false;
@@ -3995,6 +4133,75 @@ boot();
 </html>
 '''
 
+
+# ============================================================
+# ADMIN DASHBOARD
+# ============================================================
+
+ADMIN_DASHBOARD_HTML = r'''<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Movie Myanmar Admin</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#07070d;color:#f6f4ff;font-family:Arial,sans-serif}
+.wrap{min-height:100vh;padding:18px 14px 30px;background:radial-gradient(circle at 20% 0,#22104a 0,#0b0913 38%,#05050a 100%)}
+.top{padding:8px 2px 18px}.brand{font-size:25px;font-weight:900}.brand span{color:#6cf6ff}.sub{color:#aaa3bd;font-size:12px;margin-top:5px}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.stat{background:#100e18;border:1px solid #302846;border-radius:16px;padding:15px}.label{font-size:11px;color:#9d96ad}.value{font-size:25px;font-weight:900;margin-top:7px}
+.section{margin-top:18px}.head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.head h2{font-size:16px;margin:0}.muted{color:#8f899f;font-size:11px}
+.list{display:grid;gap:8px}.row{display:flex;justify-content:space-between;gap:10px;background:#100e18;border:1px solid #29233a;border-radius:13px;padding:12px}.title{font-weight:800;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.count{font-weight:900;color:#6cf6ff;white-space:nowrap}.loading{text-align:center;padding:35px;color:#aaa3bd}.err{text-align:center;padding:35px;color:#ff9b9b}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="brand">MOVIE <span>MYANMAR</span></div>
+    <div class="sub">🛠 Admin Dashboard • Xiao Yu CyB</div>
+  </div>
+  <div id="content" class="loading">Loading dashboard...</div>
+</div>
+<script>
+const tg=window.Telegram?.WebApp;if(tg){tg.ready();tg.expand()}
+const $=id=>document.getElementById(id);
+function esc(s){return String(s||'').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]))}
+async function api(url){
+  try{
+    const headers={};
+    if(tg?.initData) headers['X-Telegram-Init-Data']=tg.initData;
+    const r=await fetch(url,{cache:'no-store',headers});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok) return Object.assign({},d,{__error:true});
+    return d;
+  }catch(e){return {__error:true}}
+}
+async function boot(){
+  const d=await api('/api/admin');
+  if(d.__error){$('content').innerHTML='<div class="err">🔒 Admin only<br><br>'+esc(d.message||'Access denied')+'</div>';return}
+  const top=(d.top_movies||[]).map(x=>`<div class="row"><div class="title">${esc(x.title)}</div><div class="count">${x.views}</div></div>`).join('');
+  $('content').innerHTML=`
+    <div class="grid">
+      <div class="stat"><div class="label">TOTAL MOVIES</div><div class="value">${d.total_movies}</div></div>
+      <div class="stat"><div class="label">USERS</div><div class="value">${d.total_users}</div></div>
+      <div class="stat"><div class="label">SEARCHES</div><div class="value">${d.total_searches}</div></div>
+      <div class="stat"><div class="label">AI REQUESTS</div><div class="value">${d.total_ai_requests}</div></div>
+    </div>
+    <section class="section">
+      <div class="head"><h2>🔥 Most Viewed</h2><span class="muted">Mini App</span></div>
+      <div class="list">${top||'<div class="loading">No movie views yet</div>'}</div>
+    </section>
+    <section class="section">
+      <div class="head"><h2>🎬 Recent Movies</h2><span class="muted">Latest 10</span></div>
+      <div class="list">${(d.recent_movies||[]).map(x=>`<div class="row"><div class="title">${esc(x.title)}${x.year?' ('+esc(x.year)+')':''}</div></div>`).join('')}</div>
+    </section>`;
+}
+boot();
+</script>
+</body>
+</html>
+'''
 
 # ============================================================
 # MINI APP MOVIE SERIALIZER
@@ -4316,6 +4523,70 @@ class HealthHandler(
                     "text/html; charset=utf-8",
                 )
 
+            if path == "/admin":
+                return self.send_bytes(
+                    ADMIN_DASHBOARD_HTML.encode(
+                        "utf-8"
+                    ),
+                    "text/html; charset=utf-8",
+                )
+
+            # ------------------------------------------------
+            # ADMIN DASHBOARD DATA
+            # ------------------------------------------------
+
+            if path == "/api/admin":
+                if not is_admin_user(uid):
+                    return self.send_json(
+                        {
+                            "ok": False,
+                            "message": "Admin only.",
+                        },
+                        403,
+                    )
+
+                with movie_lock:
+                    total_movies = len(movie_database)
+                    recent_movies = [
+                        mini_movie(movie)
+                        for movie in list(reversed(movie_database))[:10]
+                    ]
+
+                with stats_lock:
+                    total_users = len(admin_stats.get("users", {}))
+                    total_searches = int(admin_stats.get("searches", 0) or 0)
+                    total_ai_requests = int(admin_stats.get("ai_requests", 0) or 0)
+                    view_map = dict(admin_stats.get("movie_views", {}))
+
+                top_movies = []
+                for movie_id, views in sorted(
+                    view_map.items(),
+                    key=lambda item: int(item[1] or 0),
+                    reverse=True,
+                )[:10]:
+                    movie = find_movie_by_id(movie_id)
+                    if not movie:
+                        continue
+                    top_movies.append(
+                        {
+                            "id": str(movie_id),
+                            "title": movie.get("title", "Movie"),
+                            "views": int(views or 0),
+                        }
+                    )
+
+                return self.send_json(
+                    {
+                        "ok": True,
+                        "total_movies": total_movies,
+                        "total_users": total_users,
+                        "total_searches": total_searches,
+                        "total_ai_requests": total_ai_requests,
+                        "top_movies": top_movies,
+                        "recent_movies": recent_movies,
+                    }
+                )
+
             # ------------------------------------------------
             # ALL / LATEST MOVIES
             # ------------------------------------------------
@@ -4324,27 +4595,20 @@ class HealthHandler(
                 "/api/movies",
                 "/api/latest",
             ):
-                try:
-                    limit = int(
-                        qs.get(
-                            "limit",
-                            ["20"],
-                        )[0]
-                    )
-                except Exception:
-                    limit = 20
+                raw_limit = qs.get(
+                    "limit",
+                    [""],
+                )[0].strip()
 
-                limit = max(
-                    1,
-                    min(
-                        limit,
-                        50,
-                    ),
-                )
+                if raw_limit:
+                    try:
+                        limit = max(1, int(raw_limit))
+                    except Exception:
+                        limit = None
+                else:
+                    limit = None
 
-                movies = latest(
-                    limit
-                )
+                movies = latest(limit)
 
                 return self.send_json(
                     {
@@ -4411,9 +4675,7 @@ class HealthHandler(
                 )[0]
 
                 if genre == "All":
-                    results = latest(
-                        50
-                    )
+                    results = latest()
 
                 else:
                     with movie_lock:
@@ -4428,7 +4690,7 @@ class HealthHandler(
                                 "genres",
                                 [],
                             )
-                        ][:50]
+                        ]
 
                 return self.send_json(
                     {
@@ -4455,6 +4717,9 @@ class HealthHandler(
                 movie = find_movie_by_id(
                     movie_id
                 )
+
+                if movie:
+                    record_movie_view(movie_id)
 
                 return self.send_json(
                     mini_movie(movie)

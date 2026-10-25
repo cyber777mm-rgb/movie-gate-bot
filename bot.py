@@ -847,9 +847,51 @@ def normalize_movie_database():
 # MOVIE DATABASE
 # ============================================================
 
+def restore_movies_from_github():
+    """Restore/merge the durable GitHub copy without blocking startup."""
+    global movie_database
+
+    if not github_enabled():
+        return
+
+    try:
+        print("GitHub movie restore: starting background load")
+        remote_movies, _ = github_get_movies()
+        if not isinstance(remote_movies, list) or not remote_movies:
+            print("GitHub movie restore: no remote movies found")
+            return
+
+        with movie_lock:
+            local_snapshot = list(movie_database)
+            merged = merge_movie_lists(
+                local_snapshot,
+                remote_movies,
+            )
+            movie_database = merged
+            snapshot = list(movie_database)
+
+        save_json(
+            MOVIE_DB_FILE,
+            snapshot,
+        )
+
+        print(
+            "GitHub movie restore complete:",
+            len(snapshot),
+            "movies",
+        )
+
+    except Exception as e:
+        print("GitHub movie restore error:", e)
+        print(traceback.format_exc())
+
+
 def load_movies():
     global movie_database
 
+    # IMPORTANT: Render startup must never wait for GitHub/network I/O.
+    # Load the local persistent copy first, open the HTTP port, then
+    # restore the durable GitHub copy in the background.
     local_movies = load_json(
         MOVIE_DB_FILE,
         [],
@@ -858,25 +900,13 @@ def load_movies():
     if not isinstance(local_movies, list):
         local_movies = []
 
-    # Load the durable GitHub copy when configured, then merge both
-    # sources. This is what keeps existing movies alive after a
-    # Render restart/redeploy. Local records win on duplicate IDs.
-    remote_movies = []
-    if github_enabled():
-        remote_movies, _ = github_get_movies()
-        if not isinstance(remote_movies, list):
-            remote_movies = []
-
     movie_database = merge_movie_lists(
-        remote_movies,
         local_movies,
+        [],
     )
 
-    changed = normalize_movie_database()
+    normalize_movie_database()
 
-    # Always write the merged result locally. If GitHub is enabled,
-    # also refresh the durable copy so both sides contain the same
-    # complete movie list.
     with movie_lock:
         snapshot = list(movie_database)
 
@@ -885,20 +915,21 @@ def load_movies():
         snapshot,
     )
 
-    # IMPORTANT:
-    # Do not write to GitHub during startup. The deploy repository
-    # must never be updated just because Render restarted the bot.
-    # Movie changes are backed up only by save_movies() after an
-    # actual movie is added/updated.
-
     print(
-        "Loaded movies:",
+        "Loaded local movies:",
         len(movie_database),
         "from",
         MOVIE_DB_FILE,
         "GitHub backup:",
         "ON" if github_enabled() else "OFF",
     )
+
+    if github_enabled():
+        threading.Thread(
+            target=restore_movies_from_github,
+            daemon=True,
+            name="github-movie-restore",
+        ).start()
 
 
 def save_movies():
@@ -1062,10 +1093,9 @@ def increase_ai_usage(uid):
     save_admin_stats()
 
 
-migrate_old_data()
-load_movies()
-load_ai_usage()
-load_admin_stats()
+# Startup data loading is intentionally performed inside main(), after
+# the Render health server has started. This prevents a slow filesystem
+# or network restore from making Render think the web service has no port.
 
 
 # ============================================================
@@ -3293,36 +3323,12 @@ MUSEUM_HTML = r'''<!doctype html>
 .hall{background:radial-gradient(ellipse at 50% 22%,#3b2a18 0,#16110d 40%,#050505 78%);perspective:1000px}.room{position:absolute;inset:10% 0 0;transform-style:preserve-3d}.back{position:absolute;left:18%;right:18%;top:13%;bottom:16%;background:linear-gradient(180deg,#20170f,#0c0907);border:1px solid #654c29;box-shadow:0 0 80px #000}.wall{position:absolute;top:7%;bottom:10%;width:45%;background:linear-gradient(180deg,#21180f,#0a0807);border:1px solid #5c4527}.wall.left{left:-8%;transform-origin:right;transform:rotateY(25deg)}.wall.right{right:-8%;transform-origin:left;transform:rotateY(-25deg)}.floor{position:absolute;left:7%;right:7%;bottom:0;height:35%;background:repeating-linear-gradient(90deg,#24190e 0 14%,#120d08 14% 15%);transform:perspective(500px) rotateX(58deg);transform-origin:bottom;box-shadow:0 -30px 50px #000 inset}.ceiling{position:absolute;left:7%;right:7%;top:0;height:22%;background:linear-gradient(#17110b,#0b0806);transform:perspective(500px) rotateX(-55deg);transform-origin:top}.neon{position:absolute;top:12%;left:50%;width:2px;height:65%;background:#b99148;box-shadow:0 0 20px #d6b56d;opacity:.35}
 .hero{position:absolute;z-index:8;left:50%;top:24%;transform:translateX(-50%);width:90px;height:160px;filter:drop-shadow(0 0 20px #57dfff66);animation:heroGlow 3s infinite}.hero .head{position:absolute;left:29px;top:0;width:34px;height:40px;border-radius:45%;background:linear-gradient(145deg,#d8dbe2,#444956);border:1px solid #aeb5c5}.hero .eyes{position:absolute;left:34px;top:18px;width:24px;height:4px;background:#62efff;box-shadow:0 0 12px #62efff}.hero .body{position:absolute;left:8px;top:40px;width:74px;height:92px;background:linear-gradient(145deg,#252a35,#07090c);clip-path:polygon(25% 0,75% 0,100% 100%,0 100%);border:1px solid #7e8795}.hero .core{position:absolute;left:38px;top:65px;width:15px;height:15px;border-radius:50%;background:#63eaff;box-shadow:0 0 25px #63eaff}.hero .cape{position:absolute;left:5px;top:45px;width:80px;height:105px;background:linear-gradient(160deg,#171017,#3b1029);clip-path:polygon(18% 0,82% 0,100% 100%,50% 84%,0 100%);z-index:-1}@keyframes heroGlow{50%{filter:drop-shadow(0 0 34px #57dfffaa);transform:translateX(-50%) translateY(-3px)}}
 .sign{position:absolute;z-index:12;left:50%;top:11%;transform:translateX(-50%);padding:7px 15px;border:1px solid #7c6030;background:#0b0907dd;letter-spacing:2px;font-size:11px;color:#e8d19b;white-space:nowrap}.doorway{position:absolute;z-index:10;top:26%;width:100px;height:135px;border:3px solid #76582e;background:#050505;box-shadow:inset 0 0 25px #000}.doorway.d1{left:8%}.doorway.d2{right:8%}.doorway span{position:absolute;bottom:-25px;left:50%;transform:translateX(-50%);font-size:9px;white-space:nowrap;color:#c9b993}.controls{position:absolute;z-index:35;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));display:flex;justify-content:space-between;gap:8px}.ctrl{flex:1;border:1px solid #6f552d;background:#090806dd;padding:11px 8px;border-radius:3px;font-size:10px;letter-spacing:.5px}.ctrl:active{background:#241b10}
-.roomScene{background:radial-gradient(ellipse at 50% 15%,#4a341d 0,#19120c 38%,#050505 80%)}.roomScene .back{left:5%;right:5%;top:10%;bottom:20%;}.roomScene .wall.left{left:-14%;width:55%;}.roomScene .wall.right{right:-14%;width:55%}.roomScene .floor{left:0;right:0;height:38%}.roomScene .ceiling{left:0;right:0}.creatorRoom .back{left:6%;right:6%;top:10%;bottom:18%;background:radial-gradient(ellipse at 50% 45%,#3a2819 0,#18100b 58%,#090705 100%);}.creatorRoom .wall.left{left:-4%;width:34%;transform:rotateY(18deg)}.creatorRoom .wall.right{right:-4%;width:34%;transform:rotateY(-18deg)}.creatorRoom .floor{left:2%;right:2%;height:38%;background:linear-gradient(180deg,#2b1c10,#120b07 80%);}.creatorRoom .creatorStage{left:50%;top:27%;width:88%;max-width:620px;height:360px;transform:translateX(-50%);}.creatorRoom .chair{left:43%;bottom:12px;width:190px;height:190px;border-radius:82px 82px 24px 24px;background:linear-gradient(145deg,#875a38,#2b160f);}.creatorRoom .lin{left:43%;bottom:66px;width:132px;height:195px;}.creatorRoom .linFace{left:28px;width:76px;height:88px;border-radius:46%;}.creatorRoom .suit{left:5px;top:82px;width:122px;height:105px;}.creatorRoom .shirt{left:51px;top:91px;width:26px;height:82px;}.creatorRoom .tie{left:60px;top:94px;width:8px;height:68px;}.creatorRoom .xiaoGuide{right:7%;bottom:28px;width:150px;}.creatorRoom .xiaoGuide img{width:118px;height:170px;border-radius:58px 58px 18px 18px;object-fit:cover;object-position:center top;}.creatorRoom .label{font-size:9px;padding:5px 4px}.creatorRoom .roomTitle{top:13%;}.creatorRoom .roomTitle h2{font-size:24px}.creatorRoom .roomTitle p{font-size:11px} @media(max-width:390px){.creatorRoom .creatorStage{width:94%;}.creatorRoom .chair{left:42%;width:165px;height:170px}.creatorRoom .lin{left:42%;transform:translateX(-50%) scale(.9);transform-origin:bottom}.creatorRoom .xiaoGuide{right:1%;transform:scale(.86);transform-origin:bottom right}}.roomTitle{position:absolute;z-index:20;top:13%;left:50%;transform:translateX(-50%);text-align:center}.roomTitle h2{margin:0;font-size:23px;letter-spacing:2px}.roomTitle p{margin:5px 0;color:#bcae92;font-size:10px}
+.roomScene{background:radial-gradient(ellipse at 50% 15%,#4a341d 0,#19120c 38%,#050505 80%)}.roomScene .back{left:5%;right:5%;top:10%;bottom:20%;}.roomScene .wall.left{left:-14%;width:55%;}.roomScene .wall.right{right:-14%;width:55%}.roomScene .floor{left:0;right:0;height:38%}.roomScene .ceiling{left:0;right:0}.roomTitle{position:absolute;z-index:20;top:13%;left:50%;transform:translateX(-50%);text-align:center}.roomTitle h2{margin:0;font-size:23px;letter-spacing:2px}.roomTitle p{margin:5px 0;color:#bcae92;font-size:10px}
 .frames{position:absolute;z-index:9;inset:20% 3% 24%;display:flex;justify-content:space-around;align-items:flex-start;gap:10px;perspective:900px}.frame{width:24%;max-width:105px;background:#0c0906;border:7px solid #9a7438;padding:3px;box-shadow:0 12px 28px #000;transform:rotateY(-8deg);transition:.25s;position:relative}.frame:nth-child(even){transform:rotateY(8deg) translateY(20px)}.frame:after{content:"";position:absolute;inset:-2px;box-shadow:0 0 15px #e4c36a55}.frame img{display:block;width:100%;aspect-ratio:2/3;object-fit:cover;background:#17110b}.plaque{font-family:Arial,sans-serif;font-size:8px;text-align:center;color:#e8d19b;padding:5px 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.frame:active{transform:translateY(-5px) scale(1.04)}
 .wingDoors{position:absolute;z-index:12;inset:23% 4% 25%;display:grid;grid-template-columns:repeat(2,1fr);gap:13px}.wingDoor{position:relative;border:3px solid #795b31;background:linear-gradient(145deg,#17100a,#040403);box-shadow:inset 0 0 30px #000,0 15px 35px #000;display:flex;align-items:flex-end;justify-content:center;padding:12px 6px}.wingDoor:before{content:"";position:absolute;inset:8px;border:1px solid #5d4525}.wingDoor b{font-size:12px;letter-spacing:1px;text-shadow:0 2px 5px #000}.wingDoor small{position:absolute;bottom:1px;font-size:8px;color:#bbaa8b}
 .creatorStage{position:absolute;z-index:12;left:50%;top:25%;transform:translateX(-50%);width:320px;max-width:82%;height:260px}.chair{position:absolute;left:50%;bottom:8px;transform:translateX(-50%);width:155px;height:150px;border-radius:70px 70px 18px 18px;background:linear-gradient(145deg,#714c31,#24130e);border:2px solid #9d7540;box-shadow:0 20px 35px #000}.lin{position:absolute;left:50%;bottom:56px;transform:translateX(-50%);width:110px;height:165px;animation:breathe 4s ease-in-out infinite}.linFace{position:absolute;left:23px;top:0;width:64px;height:76px;border-radius:48%;background-size:cover;background-position:center 22%;border:2px solid #d7b878;box-shadow:0 8px 20px #000;overflow:hidden}.linFace:after{content:"";position:absolute;left:18px;right:18px;top:28px;height:2px;background:#ffffff22;animation:blinkFace 5s infinite}@keyframes blinkFace{0%,94%,100%{opacity:0}95%{opacity:1}}.suit{position:absolute;left:4px;top:72px;width:102px;height:92px;background:linear-gradient(145deg,#191a1f,#050506);clip-path:polygon(25% 0,75% 0,100% 100%,0 100%);border:1px solid #70644e}.shirt{position:absolute;left:43px;top:80px;width:23px;height:75px;background:#eee8dc;clip-path:polygon(50% 0,100% 100%,0 100%)}.tie{position:absolute;left:51px;top:82px;width:7px;height:62px;background:#161018}.xiaoGuide{position:absolute;right:1%;bottom:18px;width:84px;text-align:center;animation:breathe 3.5s ease-in-out infinite}.xiaoGuide img{width:72px;height:94px;object-fit:cover;object-position:center top;border-radius:38px 38px 12px 12px;border:2px solid #d7b878;box-shadow:0 12px 25px #000}.label{font-family:Arial,sans-serif;font-size:8px;color:#f0d9a2;background:#120d09;border:1px solid #70562e;padding:4px 2px;margin-top:4px}@keyframes breathe{50%{transform:translateX(-50%) translateY(-3px)}}
 .modal{position:absolute;z-index:60;inset:0;background:#000b;display:none;align-items:flex-end;justify-content:center;padding:16px}.panel{width:min(480px,100%);max-height:82vh;overflow:auto;background:linear-gradient(180deg,#241a10,#0c0907);border:1px solid #8c6b35;box-shadow:0 25px 70px #000;padding:18px;border-radius:4px}.panel img.mainPoster{display:block;width:min(190px,55%);margin:0 auto 14px;aspect-ratio:2/3;object-fit:cover;border:5px solid #a17b3d}.panel h3{margin:0 0 6px;font-size:22px}.panel p{color:#c8baa2;font-size:12px;line-height:1.6}.close{float:right;border:0;background:none;font-size:22px}.openMovie{display:block;text-align:center;text-decoration:none;border:1px solid #d4b36b;background:#513719;padding:12px;margin-top:14px;font-size:11px;letter-spacing:1px}.guideBox{border-left:2px solid #d5b36a;padding-left:12px;color:#d7c9ae;font-size:12px;line-height:1.65}
 .toast{position:absolute;z-index:80;left:50%;bottom:95px;transform:translateX(-50%);background:#090806ee;border:1px solid #7f6335;padding:9px 13px;font:11px Arial,sans-serif;white-space:nowrap;opacity:0;transition:.3s}.toast.show{opacity:1}
-
-/* FINAL MUSEUM ARCHITECTURE OVERRIDE */
-.hall,.roomScene{perspective:none;background:radial-gradient(ellipse at 50% 18%,#4b321b 0,#1b1109 38%,#050403 82%)}
-.room{position:absolute;inset:0;transform-style:preserve-3d;overflow:hidden}
-.back{left:11%!important;right:11%!important;top:16%!important;bottom:17%!important;background:linear-gradient(180deg,#2a1b0f,#0b0704)!important;border:2px solid #76552b!important;box-shadow:inset 0 0 70px #000,0 20px 55px #000!important;z-index:2}
-.wall{top:13%!important;bottom:16%!important;width:38%!important;background:linear-gradient(180deg,#2b1c10,#0d0805)!important;border:2px solid #72542d!important;z-index:4;box-shadow:inset 0 0 50px #000!important}
-.wall.left{left:-1%!important;transform:none!important;clip-path:polygon(0 0,100% 8%,100% 92%,0 100%)}
-.wall.right{right:-1%!important;transform:none!important;clip-path:polygon(0 8%,100% 0,100% 100%,0 92%)}
-.floor{left:-8%!important;right:-8%!important;bottom:-5%!important;height:34%!important;z-index:6!important}
-.ceiling{left:-8%!important;right:-8%!important;top:-4%!important;height:22%!important;z-index:7!important}
-.roomTitle{z-index:25!important;top:11%!important}.roomTitle h2{font-size:21px!important;letter-spacing:3px!important}.roomTitle p{font-size:9px!important;letter-spacing:1px}
-.sign{top:11%!important;z-index:26!important}
-.doorway{z-index:22!important;top:30%!important;width:96px!important;height:145px!important;background:linear-gradient(145deg,#28190d,#050403)!important;box-shadow:inset 0 0 35px #000,0 20px 35px #000!important}
-.doorway.d1{left:7%!important}.doorway.d2{right:7%!important}
-.hero{z-index:23!important;top:29%!important;width:100px!important;height:175px!important}
-.frames{z-index:22!important;inset:25% 14% 23%!important;display:grid!important;grid-template-columns:repeat(3,1fr)!important;align-items:center!important;gap:14px!important;perspective:900px!important}
-.frame{width:auto!important;max-width:none!important;border-width:6px!important;background:#0a0704!important;box-shadow:0 15px 35px #000,0 0 0 1px #cda65b66!important}
-.frame img{aspect-ratio:2/3!important}.plaque{font-size:7px!important;background:#0a0704dd}
-.wingDoors{z-index:22!important;inset:29% 10% 24%!important;grid-template-columns:repeat(2,1fr)!important;gap:22px!important}
-.wingDoor{background:linear-gradient(145deg,#2a1a0d,#050403)!important;box-shadow:inset 0 0 40px #000,0 20px 40px #000!important;border-width:4px!important}
-.controls{z-index:40!important}
-.creatorRoom .creatorStage{z-index:22!important;left:50%!important;top:27%!important;width:90%!important;max-width:none!important;height:370px!important}
-.creatorRoom .chair{left:42%!important;width:175px!important;height:180px!important}.creatorRoom .lin{left:42%!important}.creatorRoom .xiaoGuide{right:3%!important}
-@media(max-width:390px){.back{left:12%!important;right:12%!important}.wall{width:36%!important}.frames{inset:25% 11% 24%!important;gap:9px!important}.frame{border-width:5px!important}.wingDoors{inset:30% 7% 24%!important;gap:13px!important}.wingDoor b{font-size:10px!important}.creatorRoom .creatorStage{width:96%!important}.creatorRoom .chair{left:39%!important;width:155px!important}.creatorRoom .lin{left:39%!important}.creatorRoom .xiaoGuide{right:0!important}}
 </style>
 </head>
 <body>
@@ -3333,22 +3339,19 @@ MUSEUM_HTML = r'''<!doctype html>
     <div class="gate"><div class="gatebox"><h1>CINEMA MUSEUM</h1><p>ရုပ်ရှင်တွေကို ကြည့်ရုံမဟုတ်ဘဲ — အခန်းတွေထဲ ဝင်လည်ကြည့်မယ်။</p><button class="enter" onclick="enterMuseum()">ENTER MUSEUM</button></div></div>
   </div>
   <div class="scene hall hide" id="lobby">
-    <div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place">MAIN LOBBY</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="neon"></div><div class="sign">THE CINEMA COLLECTION</div>
+    <div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place">ပင်မခန်းမ</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="neon"></div><div class="sign">THE CINEMA COLLECTION</div>
       <div class="hero"><div class="head"></div><div class="eyes"></div><div class="cape"></div><div class="body"></div><div class="core"></div></div>
-      <div class="doorway d1" onclick="openRoom('wings')"><span>MOVIE EXHIBITION</span></div><div class="doorway d2" onclick="openRoom('creator')"><span>CREATIVE STUDIO</span></div><div class="doorway d1" style="left:27%;top:62%;transform:scale(.78)" onclick="openRoom('awardsRoom')"><span>AWARDS HALL</span></div><div class="doorway d2" style="right:27%;top:62%;transform:scale(.78)" onclick="openRoom('cyberRoom')"><span>CYBER HALL</span></div>
+      <div class="doorway d1" onclick="openRoom('wings')"><span>ကားပြခန်း</span></div><div class="doorway d2" onclick="openRoom('creator')"><span>ဖန်တီးရာခန်း</span></div>
     </div><div class="dust"></div><div class="grain"></div>
-    <div class="controls"><button class="ctrl" onclick="openRoom('wings')">🎬 MOVIE EXHIBITION</button><button class="ctrl" onclick="guide()">👩🏻 Xiao Yu</button><button class="ctrl" onclick="openRoom('creator')">🪑 CREATIVE STUDIO</button></div>
+    <div class="controls"><button class="ctrl" onclick="openRoom('wings')">🎬 ကားပြခန်း</button><button class="ctrl" onclick="guide()">👩🏻 Xiao Yu</button><button class="ctrl" onclick="openRoom('creator')">🪑 ဖန်တီးရာ</button></div>
   </div>
   <div class="scene hall hide" id="wings">
-    <div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place">MOVIE EXHIBITION</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="sign">MOVIE WINGS</div><div class="wingDoors">
+    <div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place">ကားပြခန်း</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="sign">MOVIE WINGS</div><div class="wingDoors">
       <button class="wingDoor" onclick="openGenre('Action')"><b>⚔ ACTION</b><small>တိုက်ခိုက်မှု</small></button><button class="wingDoor" onclick="openGenre('Comedy')"><b>😂 COMEDY</b><small>ဟာသ</small></button><button class="wingDoor" onclick="openGenre('Romance')"><b>❤️ ROMANCE</b><small>အချစ်</small></button><button class="wingDoor" onclick="openGenre('Horror')"><b>👻 HORROR</b><small>ကြောက်စရာ</small></button><button class="wingDoor" onclick="openGenre('Thriller')"><b>🔪 THRILLER</b><small>သည်းထိတ်ရင်ဖို</small></button><button class="wingDoor" onclick="openGenre('Drama')"><b>🎭 DRAMA</b><small>ဒရာမာ</small></button><button class="wingDoor" onclick="openGenre('Fantasy')"><b>✨ FANTASY</b><small>စိတ်ကူးယဉ်</small></button><button class="wingDoor" onclick="openGenre('All')"><b>🎞 ALL MOVIES</b><small>ကားအားလုံး</small></button>
-    </div></div><div class="dust"></div><div class="grain"></div><div class="controls"><button class="ctrl" onclick="back('lobby')">← MAIN LOBBY</button><button class="ctrl" onclick="openRoom('creator')">CREATIVE STUDIO →</button><button class="ctrl" onclick="guide()">Xiao Yu</button></div>
+    </div></div><div class="dust"></div><div class="grain"></div><div class="controls"><button class="ctrl" onclick="back('lobby')">← ပင်မခန်းမ</button><button class="ctrl" onclick="openRoom('creator')">ဖန်တီးရာ →</button><button class="ctrl" onclick="guide()">Xiao Yu</button></div>
   </div>
-  <div class="scene roomScene hide" id="genreRoom"><div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place" id="genrePlace">MOVIE ROOM</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="roomTitle"><h2 id="genreTitle">ACTION</h2><p>FILMS MOUNTED ON THE WALLS</p></div><div class="frames" id="frames"></div></div><div class="dust"></div><div class="grain"></div><div class="controls"><button class="ctrl" onclick="back('wings')">← EXHIBITION</button><button class="ctrl" onclick="back('lobby')">MAIN LOBBY</button><button class="ctrl" onclick="guide()">👩🏻 Guide</button></div></div>
-  <div class="scene roomScene creatorRoom hide" id="creator"><div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place">CREATIVE STUDIO</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="roomTitle"><h2>CREATIVE STUDIO</h2><p>ကိုကို လင်းမြတ် • Xiao Yu</p></div><div class="creatorStage"><div class="chair"></div><div class="lin"><div class="linFace"></div><div class="suit"></div><div class="shirt"></div><div class="tie"></div></div><div class="xiaoGuide"><img src="https://raw.githubusercontent.com/cyber777mm-rgb/movie-gate-bot/main/ChatGPT%20Image%20Oct%2018%2C%202026%2C%2007_47_33%20PM.png"><div class="label">XIAO YU • GUIDE</div></div></div></div><div class="dust"></div><div class="grain"></div><div class="controls"><button class="ctrl" onclick="back('lobby')">← MAIN LOBBY</button><button class="ctrl" onclick="guide()">Xiao Yu ပြောမယ်</button><button class="ctrl" onclick="openRoom('wings')">MOVIE EXHIBITION</button></div></div>
-
-  <div class="scene hall hide" id="awardsRoom"><div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place">AWARDS HALL</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="roomTitle"><h2>AWARDS HALL</h2><p>CINEMA MOMENTS • HONORS • COLLECTION</p></div><div class="frames" id="awardFrames"><div class="frame"><div style="aspect-ratio:1/1;background:radial-gradient(circle,#d7b45e,#4d3518 45%,#090705 70%);display:grid;place-items:center;font-size:34px">★</div><div class="plaque">CINEMA COLLECTION</div></div><div class="frame"><div style="aspect-ratio:1/1;background:linear-gradient(145deg,#e2c67b,#4a3216);display:grid;place-items:center;font-size:32px">🏆</div><div class="plaque">HONOR WALL</div></div><div class="frame"><div style="aspect-ratio:1/1;background:linear-gradient(145deg,#321b0f,#0b0704);display:grid;place-items:center;font-size:28px">🎞</div><div class="plaque">FILM HISTORY</div></div></div></div><div class="dust"></div><div class="controls"><button class="ctrl" onclick="back('lobby')">← MAIN LOBBY</button><button class="ctrl" onclick="openRoom('creator')">CREATIVE STUDIO</button><button class="ctrl" onclick="guide()">XIAO YU GUIDE</button></div></div>
-  <div class="scene hall hide" id="cyberRoom"><div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place">CYBER HALL</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="roomTitle"><h2>CYBER HALL</h2><p>THE ORIGINAL MUSEUM GUARDIAN</p></div><div class="hero"><div class="head"></div><div class="eyes"></div><div class="cape"></div><div class="body"></div><div class="core"></div></div><div class="sign">CYBER • ORIGINAL CHARACTER</div></div><div class="dust"></div><div class="controls"><button class="ctrl" onclick="back('lobby')">← MAIN LOBBY</button><button class="ctrl" onclick="openRoom('wings')">MOVIE EXHIBITION</button><button class="ctrl" onclick="guide()">XIAO YU GUIDE</button></div></div>
+  <div class="scene roomScene hide" id="genreRoom"><div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place" id="genrePlace">MOVIE ROOM</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="roomTitle"><h2 id="genreTitle">ACTION</h2><p>နရံပေါ်က movie exhibits တွေကို နှိပ်ကြည့်ပါ</p></div><div class="frames" id="frames"></div></div><div class="dust"></div><div class="grain"></div><div class="controls"><button class="ctrl" onclick="back('wings')">← အခန်းရွေး</button><button class="ctrl" onclick="back('lobby')">ပင်မခန်းမ</button><button class="ctrl" onclick="guide()">👩🏻 Guide</button></div></div>
+  <div class="scene roomScene hide" id="creator"><div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place">ဖန်တီးရာခန်း</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="roomTitle"><h2>ဖန်တီးရာ</h2><p>ကိုကို လင်းမြတ် • Xiao Yu</p></div><div class="creatorStage"><div class="chair"></div><div class="lin"><div class="linFace"></div><div class="suit"></div><div class="shirt"></div><div class="tie"></div></div><div class="xiaoGuide"><img src="WELCOME_IMAGE"><div class="label">XIAO YU • GUIDE</div></div></div></div><div class="dust"></div><div class="grain"></div><div class="controls"><button class="ctrl" onclick="back('lobby')">← ပင်မခန်းမ</button><button class="ctrl" onclick="guide()">Xiao Yu ပြောမယ်</button><button class="ctrl" onclick="openRoom('wings')">ကားပြခန်း</button></div></div>
   <div class="modal" id="modal" onclick="if(event.target===this)closeModal()"><div class="panel" id="panel"></div></div><div class="toast" id="toast"></div>
 </div>
 <script>
@@ -3365,7 +3368,7 @@ function openRoom(id){document.querySelector('.scene:not(.hide)')?.classList.add
 function back(id){show(id)}
 async function openGenre(name){show('genreRoom');$('genreTitle').textContent=name.toUpperCase();$('genrePlace').textContent=name+' ROOM';const box=$('frames');box.innerHTML='<div style="color:#bcae92;font:12px Arial;text-align:center;width:100%;padding-top:120px">နရံပေါ်က exhibits တွေကို တင်နေပါတယ်…</div>';try{const d=await api('/api/genre?name='+encodeURIComponent(name));const movies=(d.movies||[]).slice(0,12);box.innerHTML=movies.length?movies.map(m=>{const src=m.poster?apiUrl('/api/poster?id='+encodeURIComponent(m.id)):'';return `<button class="frame" onclick="movie('${encodeURIComponent(m.id)}')">${src?`<img src="${src}" loading="lazy">`:'<div style="aspect-ratio:2/3;background:#17110b"></div>'}<div class="plaque">${esc(m.title)}</div></button>`}).join(''):'<div style="color:#bcae92;font:12px Arial;text-align:center;width:100%;padding-top:120px">ဒီအခန်းမှာ ကားမရှိသေးဘူး</div>'}catch(e){toast('Museum data ကို ဖွင့်မရသေးဘူး');}}
 async function movie(id){try{const d=await api('/api/movie?id='+decodeURIComponent(id));const p=d.poster?apiUrl('/api/poster?id='+encodeURIComponent(d.id)):'';$('panel').innerHTML=`<button class="close" onclick="closeModal()">×</button>${p?`<img class="mainPoster" src="${p}">`:''}<h3>${esc(d.title||'Movie')}</h3><p>${esc([d.year,d.quality,d.audio].filter(Boolean).join(' • '))}</p><p>${esc(d.description||'Movie Myanmar Cinema Museum exhibit')}</p>${d.link?`<a class="openMovie" href="${esc(d.link)}" target="_blank" rel="noopener">🎬 OPEN MOVIE</a>`:''}`;$('modal').style.display='flex'}catch(e){toast('Movie ကို မဖွင့်နိုင်သေးဘူး')}}
-function guide(){$('panel').innerHTML='<button class="close" onclick="closeModal()">×</button><h3>👩🏻 Xiao Yu</h3><div class="guideBox">ဟေး 😝 Xiao Yu ပါ။ ဒီ Museum မှာ အခန်းတစ်ခန်းချင်းစီ ဝင်လည်လို့ရတယ်။ MOVIE EXHIBITIONထဲက WALL-MOUNTED POSTER ကိုနှိပ်ရင် ကားအကြောင်းကြည့်ပြီး <b>OPEN MOVIE</b> နဲ့ ဆက်သွားလို့ရတယ်နော်။</div>';$('modal').style.display='flex'}
+function guide(){$('panel').innerHTML='<button class="close" onclick="closeModal()">×</button><h3>👩🏻 Xiao Yu</h3><div class="guideBox">ဟေး 😝 Xiao Yu ပါ။ ဒီ Museum မှာ အခန်းတစ်ခန်းချင်းစီ ဝင်လည်လို့ရတယ်။ ကားပြခန်းထဲက နရံပေါ်ချိတ်ထားတဲ့ poster ကိုနှိပ်ရင် ကားအကြောင်းကြည့်ပြီး <b>OPEN MOVIE</b> နဲ့ ဆက်သွားလို့ရတယ်နော်။</div>';$('modal').style.display='flex'}
 function closeModal(){$('modal').style.display='none'}function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}function toast(t){$('toast').textContent=t;$('toast').classList.add('show');setTimeout(()=>$('toast').classList.remove('show'),1800)}
 if(!INIT){toast('Telegram ထဲကနေ Museum ကိုဖွင့်ပါ')}
 </script>
@@ -5058,6 +5061,15 @@ async def main():
         daemon=True,
         name="movie-http-server",
     ).start()
+
+    # Load local data only after the port is already listening. GitHub
+    # movie restoration is started by load_movies() in the background.
+    print("Startup data load: beginning")
+    migrate_old_data()
+    load_movies()
+    load_ai_usage()
+    load_admin_stats()
+    print("Startup data load: complete")
 
     application = (
         Application

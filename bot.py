@@ -242,7 +242,7 @@ def uploader_keyboard():
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 GITHUB_REPO = os.getenv(
     "GITHUB_REPO",
-    "cyber777mm-rgb/movie-myanmar-data",
+    "cyber777mm-rgb/movie-gate-bot",
 ).strip().strip("/")
 GITHUB_MOVIE_FILE = os.getenv(
     "GITHUB_MOVIE_FILE",
@@ -419,7 +419,26 @@ admin_stats = {
     "searches": 0,
     "movie_views": {},
     "ai_requests": 0,
+    "activities": [],
 }
+
+POINT_RULES = {
+    "app_open": 2,
+    "search": 2,
+    "category": 1,
+    "movie_view": 10,
+    "ai": 3,
+}
+POINT_DAILY_CAP = 250
+POINT_COOLDOWNS = {
+    "mini_app": 3600,
+    "latest": 60,
+    "category": 60,
+    "search": 30,
+    "movie_view": 600,
+    "ai": 15,
+}
+ACTIVITY_LIMIT = 500
 
 
 # ============================================================
@@ -956,30 +975,20 @@ def save_ai_usage():
 
 def load_admin_stats():
     global admin_stats
-
-    data = load_json(
-        ADMIN_STATS_FILE,
-        {},
-    )
-
+    data = load_json(ADMIN_STATS_FILE, {})
     if not isinstance(data, dict):
         data = {}
-
     users = data.get("users", {})
     movie_views = data.get("movie_views", {})
-
+    activities = data.get("activities", [])
     admin_stats = {
         "users": users if isinstance(users, dict) else {},
         "searches": int(data.get("searches", 0) or 0),
         "movie_views": movie_views if isinstance(movie_views, dict) else {},
         "ai_requests": int(data.get("ai_requests", 0) or 0),
+        "activities": activities[-ACTIVITY_LIMIT:] if isinstance(activities, list) else [],
     }
-
-    print(
-        "Loaded admin stats:",
-        len(admin_stats["users"]),
-        "users",
-    )
+    print("Loaded admin stats:", len(admin_stats["users"]), "users")
 
 
 def save_admin_stats():
@@ -989,29 +998,71 @@ def save_admin_stats():
             "searches": int(admin_stats.get("searches", 0) or 0),
             "movie_views": dict(admin_stats.get("movie_views", {})),
             "ai_requests": int(admin_stats.get("ai_requests", 0) or 0),
+            "activities": list(admin_stats.get("activities", []))[-ACTIVITY_LIMIT:],
         }
+    save_json(ADMIN_STATS_FILE, snapshot)
 
-    save_json(
-        ADMIN_STATS_FILE,
-        snapshot,
-    )
+
+def _day_key(ts=None):
+    return time.strftime("%Y-%m-%d", time.localtime(ts or time.time()))
+
+
+def record_activity(uid, action, detail="", points=0):
+    key = str(uid or "").strip()
+    if not key:
+        return
+    now = int(time.time())
+    with stats_lock:
+        users = admin_stats.setdefault("users", {})
+        u = users.setdefault(key, {"first_seen": now})
+        u["last_seen"] = now
+        u.setdefault("points", 0)
+        u.setdefault("level", 1)
+        u.setdefault("streak", 1)
+        today = _day_key(now)
+        if u.get("last_day") != today:
+            prev = u.get("last_day")
+            u["streak"] = int(u.get("streak", 0) or 0) + 1 if prev else 1
+            u["daily_points"] = 0
+            u["last_day"] = today
+        grant = max(0, int(points or 0))
+        # Anti-farm: the same action/detail only earns again after its cooldown.
+        award_key = str(action) + ":" + str(detail)[:80]
+        award_times = u.setdefault("award_times", {})
+        last_award = int(award_times.get(award_key, 0) or 0)
+        cooldown = int(POINT_COOLDOWNS.get(str(action), 0) or 0)
+        if cooldown and now - last_award < cooldown:
+            grant = 0
+        daily = int(u.get("daily_points", 0) or 0)
+        grant = min(grant, max(0, POINT_DAILY_CAP - daily))
+        if grant:
+            award_times[award_key] = now
+            # Keep the user record bounded even after long-term use.
+            if len(award_times) > 120:
+                for stale_key, _ in sorted(award_times.items(), key=lambda item: item[1])[:-80]:
+                    award_times.pop(stale_key, None)
+            u["points"] = int(u.get("points", 0) or 0) + grant
+            u["daily_points"] = daily + grant
+            u["level"] = 1 + int(u["points"]) // 250
+        activities = admin_stats.setdefault("activities", [])
+        activities.append({"uid": key, "action": str(action), "detail": str(detail)[:120], "points": grant, "ts": now})
+        if len(activities) > ACTIVITY_LIMIT:
+            del activities[:-ACTIVITY_LIMIT]
+    save_admin_stats()
 
 
 def record_user(uid):
     key = str(uid or "").strip()
     if not key:
         return
-
+    now = int(time.time())
     with stats_lock:
         users = admin_stats.setdefault("users", {})
-        if key in users:
-            return
-        now = int(time.time())
-        users[key] = {
-            "first_seen": now,
-            "last_seen": now,
-        }
-
+        u = users.setdefault(key, {"first_seen": now})
+        u["last_seen"] = now
+        u.setdefault("points", 0)
+        u.setdefault("level", 1)
+        u.setdefault("streak", 1)
     save_admin_stats()
 
 
@@ -2403,6 +2454,7 @@ async def message_handler(
         results = movie_search(
             text
         )
+        record_activity(uid, "search", text, POINT_RULES["search"])
 
         if results:
             await show_movie_list(
@@ -2450,6 +2502,7 @@ async def message_handler(
 
         if answer:
             increase_ai_usage(uid)
+            record_activity(uid, "ai", "Xiao Yu AI", POINT_RULES["ai"])
 
             await message.reply_text(
                 answer
@@ -2521,6 +2574,22 @@ async def message_handler(
 # ============================================================
 # ADMIN MOVIE UPLOADER
 # ============================================================
+
+async def upload_command(update, context):
+    user = update.effective_user
+    if not user or not is_admin_user(user.id):
+        return
+    clear_uploader(user.id)
+    uploader_sessions[str(user.id)] = {
+        "video_file_id": "",
+        "poster_file_id": "",
+        "caption": "",
+        "state": "video",
+    }
+    await update.effective_message.reply_text(
+        "🚀 Movie Upload စပါပြီ။\n\n🎬 အရင်ဆုံး Video / MKV file ပို့ပေးပါ။"
+    )
+
 
 async def uploader_video_handler(update, context):
     message = update.effective_message
@@ -3637,6 +3706,12 @@ body{
     color:#fff;
     border:1px solid #3d3157;
 }
+
+.museum{margin:18px 14px 0;border:1px solid #493761;border-radius:24px;overflow:hidden;background:linear-gradient(180deg,#1a1326,#09080e);box-shadow:0 22px 60px #0009}
+.museum-hall{position:relative;min-height:300px;padding:20px 14px 18px;background:radial-gradient(ellipse at 50% 0,#58356b55 0,#17101f 40%,#08070b 100%);overflow:hidden}
+.museum-hall:before{content:"";position:absolute;left:0;right:0;bottom:0;height:82px;background:linear-gradient(165deg,#241a2b,#0b090d);border-top:1px solid #594467;transform:perspective(260px) rotateX(35deg);transform-origin:bottom}
+.museum-title{position:relative;text-align:center;font-size:18px;font-weight:900;letter-spacing:2px}.museum-sub{position:relative;text-align:center;color:#b7adc2;font-size:11px;margin:5px 0 18px}
+.exhibits{position:relative;z-index:2;display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:end}.exhibit{background:#0d0b12;border:1px solid #604d6d;border-radius:14px;padding:8px;box-shadow:0 10px 24px #0008}.frame{height:145px;border:5px solid #7b603a;background:linear-gradient(145deg,#29121e,#07070a);display:flex;align-items:center;justify-content:center;text-align:center;box-shadow:inset 0 0 0 2px #d6aa5b55}.nezha{font-size:27px;font-weight:1000;color:#ffcf70;text-shadow:0 0 18px #ff4d00;line-height:1}.nezha small{display:block;font-size:9px;color:#fff;margin-top:8px;letter-spacing:2px}.xiaoyu{height:145px;position:relative;display:flex;align-items:flex-end;justify-content:center;background:radial-gradient(circle at 50% 25%,#8c5cff33,#09070d 68%);overflow:hidden}.xiaoyu .girl{font-size:78px;filter:drop-shadow(0 0 14px #bb5cff88)}.plaque{font-size:10px;color:#d9cfdf;text-align:center;padding-top:7px;font-weight:800}.museum-note{position:relative;z-index:2;margin-top:14px;padding:11px;border:1px solid #3a2d46;border-radius:12px;background:#0d0a12cc;color:#c9bfd1;font-size:11px;line-height:1.55}
 </style>
 </head>
 
@@ -3668,6 +3743,25 @@ Xiao Yu CyB • Cinema Mini App
 </div>
 
 </header>
+
+
+<section class="museum">
+  <div class="museum-hall">
+    <div class="museum-title">🏛️ MOVIE MYANMAR MUSEUM</div>
+    <div class="museum-sub">Cinema Collection • Curated by Xiao Yu CyB</div>
+    <div class="exhibits">
+      <div class="exhibit" onclick="renderResults('🏛️ MUSEUM COLLECTION', movies)">
+        <div class="frame"><img src="https://image.cine21.com/cine21/poster/2019/0903/17_58_14__5d6e2b26ae426.jpg" alt="Ne Zha poster" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none';this.parentNode.innerHTML='<div class=&quot;nezha&quot;>NE ZHA<small>LEGEND EXHIBIT</small></div>'" /></div>
+        <div class="plaque">🔥 Nezha Poster Gallery</div>
+      </div>
+      <div class="exhibit" onclick="openAi()">
+        <div class="xiaoyu"><div class="girl">👧🏻</div></div>
+        <div class="plaque">✨ Xiao Yu • Museum Guide</div>
+      </div>
+    </div>
+    <div class="museum-note">🎬 ဒီပြတိုက်ရဲ့ Collection က Movie Myanmar မှာ တင်ထားတဲ့ကားတွေနဲ့အတူ တိုးလာမယ်။ Poster ကိုနှိပ်ရင် Collection ကိုကြည့်နိုင်ပြီး Xiao Yu ကိုနှိပ်ရင် Guide နဲ့စကားပြောနိုင်တယ်။</div>
+  </div>
+</section>
 
 <section class="section">
 
@@ -4193,6 +4287,14 @@ async function boot(){
       <div class="list">${top||'<div class="loading">No movie views yet</div>'}</div>
     </section>
     <section class="section">
+      <div class="head"><h2>⭐ Leaderboard</h2><span class="muted">Top 20</span></div>
+      <div class="list">${(d.leaderboard||[]).map((x,i)=>`<div class="row"><div class="title">#${i+1} • ${esc(x.uid)} • Lv.${x.level} • 🔥${x.streak}</div><div class="count">${x.points} ⭐</div></div>`).join('')||'<div class="loading">No points yet</div>'}</div>
+    </section>
+    <section class="section">
+      <div class="head"><h2>🛰 Recent Activity</h2><span class="muted">Latest 50</span></div>
+      <div class="list">${(d.activities||[]).map(x=>`<div class="row"><div class="title">${esc(x.uid)} • ${esc(x.action)}${x.detail?' • '+esc(x.detail):''}</div><div class="count">${x.points?('+'+x.points+'⭐'):''}</div></div>`).join('')||'<div class="loading">No activity yet</div>'}</div>
+    </section>
+    <section class="section">
       <div class="head"><h2>🎬 Recent Movies</h2><span class="muted">Latest 10</span></div>
       <div class="list">${(d.recent_movies||[]).map(x=>`<div class="row"><div class="title">${esc(x.title)}${x.year?' ('+esc(x.year)+')':''}</div></div>`).join('')}</div>
     </section>`;
@@ -4368,6 +4470,7 @@ def webapp_auth_response(headers, qs):
     )
 
     if allowed:
+        record_activity(uid, "mini_app", "open", POINT_RULES.get("mini_app", 0))
         return {
             "ok": True,
             "authorized": True,
@@ -4557,6 +4660,17 @@ class HealthHandler(
                     total_searches = int(admin_stats.get("searches", 0) or 0)
                     total_ai_requests = int(admin_stats.get("ai_requests", 0) or 0)
                     view_map = dict(admin_stats.get("movie_views", {}))
+                    users_map = dict(admin_stats.get("users", {}))
+                    activities = list(admin_stats.get("activities", []))[-50:]
+
+                leaderboard = sorted(
+                    [
+                        {"uid": k, "points": int(v.get("points", 0) or 0), "level": int(v.get("level", 1) or 1), "streak": int(v.get("streak", 1) or 1), "last_seen": int(v.get("last_seen", 0) or 0)}
+                        for k, v in users_map.items()
+                    ],
+                    key=lambda x: x["points"],
+                    reverse=True,
+                )[:20]
 
                 top_movies = []
                 for movie_id, views in sorted(
@@ -4584,6 +4698,8 @@ class HealthHandler(
                         "total_ai_requests": total_ai_requests,
                         "top_movies": top_movies,
                         "recent_movies": recent_movies,
+                        "leaderboard": leaderboard,
+                        "activities": list(reversed(activities)),
                     }
                 )
 
@@ -4608,6 +4724,7 @@ class HealthHandler(
                 else:
                     limit = None
 
+                record_activity(uid, "latest", "Mini App", POINT_RULES.get("latest", 0))
                 movies = latest(limit)
 
                 return self.send_json(
@@ -4674,6 +4791,8 @@ class HealthHandler(
                     [""],
                 )[0]
 
+                record_activity(uid, "category", genre or "All", POINT_RULES.get("category", 0))
+
                 if genre == "All":
                     results = latest()
 
@@ -4720,6 +4839,7 @@ class HealthHandler(
 
                 if movie:
                     record_movie_view(movie_id)
+                    record_activity(uid, "movie_view", movie.get("title", "Movie"), POINT_RULES["movie_view"])
 
                 return self.send_json(
                     mini_movie(movie)
@@ -5007,6 +5127,14 @@ async def main():
     # --------------------------------------------------------
     # ADMIN UPLOADER
     # --------------------------------------------------------
+
+    application.add_handler(
+        CommandHandler(
+            "upload",
+            upload_command,
+        ),
+        group=0,
+    )
 
     application.add_handler(
         CommandHandler(

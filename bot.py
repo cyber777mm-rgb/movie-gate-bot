@@ -847,51 +847,9 @@ def normalize_movie_database():
 # MOVIE DATABASE
 # ============================================================
 
-def restore_movies_from_github():
-    """Restore/merge the durable GitHub copy without blocking startup."""
-    global movie_database
-
-    if not github_enabled():
-        return
-
-    try:
-        print("GitHub movie restore: starting background load")
-        remote_movies, _ = github_get_movies()
-        if not isinstance(remote_movies, list) or not remote_movies:
-            print("GitHub movie restore: no remote movies found")
-            return
-
-        with movie_lock:
-            local_snapshot = list(movie_database)
-            merged = merge_movie_lists(
-                local_snapshot,
-                remote_movies,
-            )
-            movie_database = merged
-            snapshot = list(movie_database)
-
-        save_json(
-            MOVIE_DB_FILE,
-            snapshot,
-        )
-
-        print(
-            "GitHub movie restore complete:",
-            len(snapshot),
-            "movies",
-        )
-
-    except Exception as e:
-        print("GitHub movie restore error:", e)
-        print(traceback.format_exc())
-
-
 def load_movies():
     global movie_database
 
-    # IMPORTANT: Render startup must never wait for GitHub/network I/O.
-    # Load the local persistent copy first, open the HTTP port, then
-    # restore the durable GitHub copy in the background.
     local_movies = load_json(
         MOVIE_DB_FILE,
         [],
@@ -900,13 +858,25 @@ def load_movies():
     if not isinstance(local_movies, list):
         local_movies = []
 
+    # Load the durable GitHub copy when configured, then merge both
+    # sources. This is what keeps existing movies alive after a
+    # Render restart/redeploy. Local records win on duplicate IDs.
+    remote_movies = []
+    if github_enabled():
+        remote_movies, _ = github_get_movies()
+        if not isinstance(remote_movies, list):
+            remote_movies = []
+
     movie_database = merge_movie_lists(
+        remote_movies,
         local_movies,
-        [],
     )
 
-    normalize_movie_database()
+    changed = normalize_movie_database()
 
+    # Always write the merged result locally. If GitHub is enabled,
+    # also refresh the durable copy so both sides contain the same
+    # complete movie list.
     with movie_lock:
         snapshot = list(movie_database)
 
@@ -915,21 +885,20 @@ def load_movies():
         snapshot,
     )
 
+    # IMPORTANT:
+    # Do not write to GitHub during startup. The deploy repository
+    # must never be updated just because Render restarted the bot.
+    # Movie changes are backed up only by save_movies() after an
+    # actual movie is added/updated.
+
     print(
-        "Loaded local movies:",
+        "Loaded movies:",
         len(movie_database),
         "from",
         MOVIE_DB_FILE,
         "GitHub backup:",
         "ON" if github_enabled() else "OFF",
     )
-
-    if github_enabled():
-        threading.Thread(
-            target=restore_movies_from_github,
-            daemon=True,
-            name="github-movie-restore",
-        ).start()
 
 
 def save_movies():
@@ -1093,9 +1062,10 @@ def increase_ai_usage(uid):
     save_admin_stats()
 
 
-# Startup data loading is intentionally performed inside main(), after
-# the Render health server has started. This prevents a slow filesystem
-# or network restore from making Render think the web service has no port.
+migrate_old_data()
+load_movies()
+load_ai_usage()
+load_admin_stats()
 
 
 # ============================================================
@@ -3329,48 +3299,66 @@ MUSEUM_HTML = r'''<!doctype html>
 .creatorStage{position:absolute;z-index:12;left:50%;top:25%;transform:translateX(-50%);width:320px;max-width:82%;height:260px}.chair{position:absolute;left:50%;bottom:8px;transform:translateX(-50%);width:155px;height:150px;border-radius:70px 70px 18px 18px;background:linear-gradient(145deg,#714c31,#24130e);border:2px solid #9d7540;box-shadow:0 20px 35px #000}.lin{position:absolute;left:50%;bottom:56px;transform:translateX(-50%);width:110px;height:165px;animation:breathe 4s ease-in-out infinite}.linFace{position:absolute;left:23px;top:0;width:64px;height:76px;border-radius:48%;background-size:cover;background-position:center 22%;border:2px solid #d7b878;box-shadow:0 8px 20px #000;overflow:hidden}.linFace:after{content:"";position:absolute;left:18px;right:18px;top:28px;height:2px;background:#ffffff22;animation:blinkFace 5s infinite}@keyframes blinkFace{0%,94%,100%{opacity:0}95%{opacity:1}}.suit{position:absolute;left:4px;top:72px;width:102px;height:92px;background:linear-gradient(145deg,#191a1f,#050506);clip-path:polygon(25% 0,75% 0,100% 100%,0 100%);border:1px solid #70644e}.shirt{position:absolute;left:43px;top:80px;width:23px;height:75px;background:#eee8dc;clip-path:polygon(50% 0,100% 100%,0 100%)}.tie{position:absolute;left:51px;top:82px;width:7px;height:62px;background:#161018}.xiaoGuide{position:absolute;right:1%;bottom:18px;width:84px;text-align:center;animation:breathe 3.5s ease-in-out infinite}.xiaoGuide img{width:72px;height:94px;object-fit:cover;object-position:center top;border-radius:38px 38px 12px 12px;border:2px solid #d7b878;box-shadow:0 12px 25px #000}.label{font-family:Arial,sans-serif;font-size:8px;color:#f0d9a2;background:#120d09;border:1px solid #70562e;padding:4px 2px;margin-top:4px}@keyframes breathe{50%{transform:translateX(-50%) translateY(-3px)}}
 .modal{position:absolute;z-index:60;inset:0;background:#000b;display:none;align-items:flex-end;justify-content:center;padding:16px}.panel{width:min(480px,100%);max-height:82vh;overflow:auto;background:linear-gradient(180deg,#241a10,#0c0907);border:1px solid #8c6b35;box-shadow:0 25px 70px #000;padding:18px;border-radius:4px}.panel img.mainPoster{display:block;width:min(190px,55%);margin:0 auto 14px;aspect-ratio:2/3;object-fit:cover;border:5px solid #a17b3d}.panel h3{margin:0 0 6px;font-size:22px}.panel p{color:#c8baa2;font-size:12px;line-height:1.6}.close{float:right;border:0;background:none;font-size:22px}.openMovie{display:block;text-align:center;text-decoration:none;border:1px solid #d4b36b;background:#513719;padding:12px;margin-top:14px;font-size:11px;letter-spacing:1px}.guideBox{border-left:2px solid #d5b36a;padding-left:12px;color:#d7c9ae;font-size:12px;line-height:1.65}
 .toast{position:absolute;z-index:80;left:50%;bottom:95px;transform:translateX(-50%);background:#090806ee;border:1px solid #7f6335;padding:9px 13px;font:11px Arial,sans-serif;white-space:nowrap;opacity:0;transition:.3s}.toast.show{opacity:1}
+
+.museumLock{position:fixed;z-index:100;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;background:radial-gradient(circle at 50% 30%,#3a2916 0,#090807 55%,#030303 100%);color:#f5e7c8}.museumLock.ok{display:none}.lockBox{width:min(390px,100%);padding:30px 22px;text-align:center;border:1px solid #80602d;background:linear-gradient(180deg,#15100bdd,#070605f2);box-shadow:0 20px 80px #000}.lockIcon{font-size:42px}.lockBox h2{letter-spacing:3px;margin:10px 0 8px}.lockBox p{font:12px Arial,sans-serif;color:#b9ab91;line-height:1.6}.lockBox a,.retry{display:block;width:100%;margin-top:14px;padding:13px;border:1px solid #a98445;background:#2a1b0d;color:#f4d99d;text-decoration:none;font:800 12px Arial,sans-serif;letter-spacing:1.5px}.retry{background:#11100e}.busy{opacity:.55;pointer-events:none}
 </style>
 </head>
 <body>
 <div id="app">
+<div id="museumLock" class="museumLock"><div class="lockBox"><div class="lockIcon">🔒</div><h2>MEMBERS ONLY</h2><p id="lockText">Join @moviemyanmar567 to enter the Cinema Museum.</p><a id="joinBtn" href="https://t.me/moviemyanmar567" target="_blank" rel="noopener">JOIN CHANNEL</a><button class="retry" onclick="checkMuseumAccess()">CHECK AGAIN</button></div></div>
+
   <div class="scene entrance" id="entrance">
     <div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place">CINEMA MUSEUM</div></div>
     <div class="building"><div class="doorframe"></div><div class="door"></div><i class="lamp l1"></i><i class="lamp l2"></i></div><div class="dust"></div><div class="grain"></div>
     <div class="gate"><div class="gatebox"><h1>CINEMA MUSEUM</h1><p>ရုပ်ရှင်တွေကို ကြည့်ရုံမဟုတ်ဘဲ — အခန်းတွေထဲ ဝင်လည်ကြည့်မယ်။</p><button class="enter" onclick="enterMuseum()">ENTER MUSEUM</button></div></div>
   </div>
   <div class="scene hall hide" id="lobby">
-    <div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place">ပင်မခန်းမ</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="neon"></div><div class="sign">THE CINEMA COLLECTION</div>
+    <div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place">MAIN LOBBY</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="neon"></div><div class="sign">THE CINEMA COLLECTION</div>
       <div class="hero"><div class="head"></div><div class="eyes"></div><div class="cape"></div><div class="body"></div><div class="core"></div></div>
-      <div class="doorway d1" onclick="openRoom('wings')"><span>ကားပြခန်း</span></div><div class="doorway d2" onclick="openRoom('creator')"><span>ဖန်တီးရာခန်း</span></div>
+      <div class="doorway d1" onclick="openRoom('wings')"><span>MOVIE EXHIBITION</span></div><div class="doorway d2" onclick="openRoom('creator')"><span>CREATIVE STUDIO</span></div>
     </div><div class="dust"></div><div class="grain"></div>
-    <div class="controls"><button class="ctrl" onclick="openRoom('wings')">🎬 ကားပြခန်း</button><button class="ctrl" onclick="guide()">👩🏻 Xiao Yu</button><button class="ctrl" onclick="openRoom('creator')">🪑 ဖန်တီးရာ</button></div>
+    <div class="controls"><button class="ctrl" onclick="openRoom('wings')">🎬 ကားပြခန်း</button><button class="ctrl" onclick="guide()">👩🏻 Xiao Yu</button><button class="ctrl" onclick="openRoom('creator')">🪑 CREATIVE STUDIO</button></div>
   </div>
   <div class="scene hall hide" id="wings">
-    <div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place">ကားပြခန်း</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="sign">MOVIE WINGS</div><div class="wingDoors">
+    <div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place">MOVIE EXHIBITION</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="sign">MOVIE WINGS</div><div class="wingDoors">
       <button class="wingDoor" onclick="openGenre('Action')"><b>⚔ ACTION</b><small>တိုက်ခိုက်မှု</small></button><button class="wingDoor" onclick="openGenre('Comedy')"><b>😂 COMEDY</b><small>ဟာသ</small></button><button class="wingDoor" onclick="openGenre('Romance')"><b>❤️ ROMANCE</b><small>အချစ်</small></button><button class="wingDoor" onclick="openGenre('Horror')"><b>👻 HORROR</b><small>ကြောက်စရာ</small></button><button class="wingDoor" onclick="openGenre('Thriller')"><b>🔪 THRILLER</b><small>သည်းထိတ်ရင်ဖို</small></button><button class="wingDoor" onclick="openGenre('Drama')"><b>🎭 DRAMA</b><small>ဒရာမာ</small></button><button class="wingDoor" onclick="openGenre('Fantasy')"><b>✨ FANTASY</b><small>စိတ်ကူးယဉ်</small></button><button class="wingDoor" onclick="openGenre('All')"><b>🎞 ALL MOVIES</b><small>ကားအားလုံး</small></button>
-    </div></div><div class="dust"></div><div class="grain"></div><div class="controls"><button class="ctrl" onclick="back('lobby')">← ပင်မခန်းမ</button><button class="ctrl" onclick="openRoom('creator')">ဖန်တီးရာ →</button><button class="ctrl" onclick="guide()">Xiao Yu</button></div>
+    </div></div><div class="dust"></div><div class="grain"></div><div class="controls"><button class="ctrl" onclick="back('lobby')">← MAIN LOBBY</button><button class="ctrl" onclick="openRoom('creator')">CREATIVE STUDIO →</button><button class="ctrl" onclick="guide()">Xiao Yu</button></div>
   </div>
-  <div class="scene roomScene hide" id="genreRoom"><div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place" id="genrePlace">MOVIE ROOM</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="roomTitle"><h2 id="genreTitle">ACTION</h2><p>နရံပေါ်က movie exhibits တွေကို နှိပ်ကြည့်ပါ</p></div><div class="frames" id="frames"></div></div><div class="dust"></div><div class="grain"></div><div class="controls"><button class="ctrl" onclick="back('wings')">← အခန်းရွေး</button><button class="ctrl" onclick="back('lobby')">ပင်မခန်းမ</button><button class="ctrl" onclick="guide()">👩🏻 Guide</button></div></div>
-  <div class="scene roomScene hide" id="creator"><div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place">ဖန်တီးရာခန်း</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="roomTitle"><h2>ဖန်တီးရာ</h2><p>ကိုကို လင်းမြတ် • Xiao Yu</p></div><div class="creatorStage"><div class="chair"></div><div class="lin"><div class="linFace"></div><div class="suit"></div><div class="shirt"></div><div class="tie"></div></div><div class="xiaoGuide"><img src="WELCOME_IMAGE"><div class="label">XIAO YU • GUIDE</div></div></div></div><div class="dust"></div><div class="grain"></div><div class="controls"><button class="ctrl" onclick="back('lobby')">← ပင်မခန်းမ</button><button class="ctrl" onclick="guide()">Xiao Yu ပြောမယ်</button><button class="ctrl" onclick="openRoom('wings')">ကားပြခန်း</button></div></div>
+  <div class="scene roomScene hide" id="genreRoom"><div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place" id="genrePlace">MOVIE ROOM</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="roomTitle"><h2 id="genreTitle">ACTION</h2><p>Tap the wall exhibits to explore</p></div><div class="frames" id="frames"></div></div><div class="dust"></div><div class="grain"></div><div class="controls"><button class="ctrl" onclick="back('wings')">← ROOM WING</button><button class="ctrl" onclick="back('lobby')">MAIN LOBBY</button><button class="ctrl" onclick="guide()">👩🏻 Guide</button></div></div>
+  <div class="scene roomScene hide" id="creator"><div class="top"><div class="brand">MOVIE MYANMAR</div><div class="place">CREATIVE STUDIO</div></div><div class="room"><div class="back"></div><div class="wall left"></div><div class="wall right"></div><div class="floor"></div><div class="ceiling"></div><div class="roomTitle"><h2>CREATIVE STUDIO</h2><p>LIN MYAT • XIAO YU</p></div><div class="creatorStage"><div class="chair"></div><div class="lin"><div class="linFace"></div><div class="suit"></div><div class="shirt"></div><div class="tie"></div></div><div class="xiaoGuide"><img src="WELCOME_IMAGE"><div class="label">XIAO YU • GUIDE</div></div></div></div><div class="dust"></div><div class="grain"></div><div class="controls"><button class="ctrl" onclick="back('lobby')">← MAIN LOBBY</button><button class="ctrl" onclick="guide()">Xiao Yu ပြောမယ်</button><button class="ctrl" onclick="openRoom('wings')">ကားပြခန်း</button></div></div>
   <div class="modal" id="modal" onclick="if(event.target===this)closeModal()"><div class="panel" id="panel"></div></div><div class="toast" id="toast"></div>
 </div>
 <script>
 const tg=window.Telegram?.WebApp; if(tg){tg.ready();tg.expand();}
 const INIT=tg?.initData||'';
+let museumAllowed=false;
+async function checkMuseumAccess(){
+  const lock=document.getElementById('museumLock');
+  const retry=document.querySelector('.retry');
+  if(!INIT){ document.getElementById('lockText').textContent='Telegram ထဲကနေ Museum ကိုဖွင့်ပါ။'; return; }
+  retry?.classList.add('busy');
+  try{
+    const r=await fetch('/api/auth?initData='+encodeURIComponent(INIT),{cache:'no-store',headers:{'X-Telegram-Init-Data':INIT}});
+    const d=await r.json();
+    if(d.ok && d.authorized){museumAllowed=true;lock.classList.add('ok');}
+    else{museumAllowed=false;lock.classList.remove('ok');document.getElementById('lockText').textContent=d.message||'Join the Movie Myanmar Channel first.';}
+  }catch(e){museumAllowed=false;document.getElementById('lockText').textContent='Museum access ကို စစ်မရသေးဘူး။ Check Again နှိပ်ပါ။';}
+  finally{retry?.classList.remove('busy');}
+}
 const linFace='data:image/jpeg;base64,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';
 document.querySelector('.linFace').style.backgroundImage=`url("${linFace}")`;
 function $(id){return document.getElementById(id)}
 function apiUrl(path){return path+(path.includes('?')?'&':'?')+'initData='+encodeURIComponent(INIT)}
 async function api(path){const h={};if(INIT)h['X-Telegram-Init-Data']=INIT;const r=await fetch(apiUrl(path),{cache:'no-store',headers:h});if(!r.ok)throw new Error(r.status);return r.json()}
 function show(id){document.querySelectorAll('.scene').forEach(x=>x.classList.add('hide'));$(id).classList.remove('hide');window.scrollTo(0,0)}
-function enterMuseum(){ $('entrance').classList.add('walk');setTimeout(()=>show('lobby'),550);}
-function openRoom(id){document.querySelector('.scene:not(.hide)')?.classList.add('walk');setTimeout(()=>{show(id);document.querySelectorAll('.scene').forEach(x=>x.classList.remove('walk'))},520)}
+async function enterMuseum(){if(!museumAllowed){await checkMuseumAccess();if(!museumAllowed)return;} $('entrance').classList.add('walk');setTimeout(()=>show('lobby'),550);}
+async function openRoom(id){if(!museumAllowed){await checkMuseumAccess();if(!museumAllowed)return;} document.querySelector('.scene:not(.hide)')?.classList.add('walk');setTimeout(()=>{show(id);document.querySelectorAll('.scene').forEach(x=>x.classList.remove('walk'))},520)}
 function back(id){show(id)}
-async function openGenre(name){show('genreRoom');$('genreTitle').textContent=name.toUpperCase();$('genrePlace').textContent=name+' ROOM';const box=$('frames');box.innerHTML='<div style="color:#bcae92;font:12px Arial;text-align:center;width:100%;padding-top:120px">နရံပေါ်က exhibits တွေကို တင်နေပါတယ်…</div>';try{const d=await api('/api/genre?name='+encodeURIComponent(name));const movies=(d.movies||[]).slice(0,12);box.innerHTML=movies.length?movies.map(m=>{const src=m.poster?apiUrl('/api/poster?id='+encodeURIComponent(m.id)):'';return `<button class="frame" onclick="movie('${encodeURIComponent(m.id)}')">${src?`<img src="${src}" loading="lazy">`:'<div style="aspect-ratio:2/3;background:#17110b"></div>'}<div class="plaque">${esc(m.title)}</div></button>`}).join(''):'<div style="color:#bcae92;font:12px Arial;text-align:center;width:100%;padding-top:120px">ဒီအခန်းမှာ ကားမရှိသေးဘူး</div>'}catch(e){toast('Museum data ကို ဖွင့်မရသေးဘူး');}}
-async function movie(id){try{const d=await api('/api/movie?id='+decodeURIComponent(id));const p=d.poster?apiUrl('/api/poster?id='+encodeURIComponent(d.id)):'';$('panel').innerHTML=`<button class="close" onclick="closeModal()">×</button>${p?`<img class="mainPoster" src="${p}">`:''}<h3>${esc(d.title||'Movie')}</h3><p>${esc([d.year,d.quality,d.audio].filter(Boolean).join(' • '))}</p><p>${esc(d.description||'Movie Myanmar Cinema Museum exhibit')}</p>${d.link?`<a class="openMovie" href="${esc(d.link)}" target="_blank" rel="noopener">🎬 OPEN MOVIE</a>`:''}`;$('modal').style.display='flex'}catch(e){toast('Movie ကို မဖွင့်နိုင်သေးဘူး')}}
-function guide(){$('panel').innerHTML='<button class="close" onclick="closeModal()">×</button><h3>👩🏻 Xiao Yu</h3><div class="guideBox">ဟေး 😝 Xiao Yu ပါ။ ဒီ Museum မှာ အခန်းတစ်ခန်းချင်းစီ ဝင်လည်လို့ရတယ်။ ကားပြခန်းထဲက နရံပေါ်ချိတ်ထားတဲ့ poster ကိုနှိပ်ရင် ကားအကြောင်းကြည့်ပြီး <b>OPEN MOVIE</b> နဲ့ ဆက်သွားလို့ရတယ်နော်။</div>';$('modal').style.display='flex'}
+async function openGenre(name){if(!museumAllowed){await checkMuseumAccess();if(!museumAllowed)return;} show('genreRoom');$('genreTitle').textContent=name.toUpperCase();$('genrePlace').textContent=name+' ROOM';const box=$('frames');box.innerHTML='<div style="color:#bcae92;font:12px Arial;text-align:center;width:100%;padding-top:120px">နရံပေါ်က exhibits တွေကို တင်နေပါတယ်…</div>';try{const d=await api('/api/genre?name='+encodeURIComponent(name));const movies=(d.movies||[]).slice(0,12);box.innerHTML=movies.length?movies.map(m=>{const src=m.poster?apiUrl('/api/poster?id='+encodeURIComponent(m.id)):'';return `<button class="frame" onclick="movie('${encodeURIComponent(m.id)}')">${src?`<img src="${src}" loading="lazy">`:'<div style="aspect-ratio:2/3;background:#17110b"></div>'}<div class="plaque">${esc(m.title)}</div></button>`}).join(''):'<div style="color:#bcae92;font:12px Arial;text-align:center;width:100%;padding-top:120px">ဒီအခန်းမှာ ကားမရှိသေးဘူး</div>'}catch(e){toast('Museum data ကို ဖွင့်မရသေးဘူး');}}
+async function movie(id){if(!museumAllowed){await checkMuseumAccess();if(!museumAllowed)return;} try{const d=await api('/api/movie?id='+decodeURIComponent(id));const p=d.poster?apiUrl('/api/poster?id='+encodeURIComponent(d.id)):'';$('panel').innerHTML=`<button class="close" onclick="closeModal()">×</button>${p?`<img class="mainPoster" src="${p}">`:''}<h3>${esc(d.title||'Movie')}</h3><p>${esc([d.year,d.quality,d.audio].filter(Boolean).join(' • '))}</p><p>${esc(d.description||'Movie Myanmar Cinema Museum exhibit')}</p>${d.link?`<a class="openMovie" href="${esc(d.link)}" target="_blank" rel="noopener">🎬 OPEN MOVIE</a>`:''}`;$('modal').style.display='flex'}catch(e){toast('Movie ကို မဖွင့်နိုင်သေးဘူး')}}
+function guide(){if(!museumAllowed){checkMuseumAccess();return;}$('panel').innerHTML='<button class="close" onclick="closeModal()">×</button><h3>👩🏻 Xiao Yu</h3><div class="guideBox">ဟေး 😝 Xiao Yu ပါ။ ဒီ Museum မှာ အခန်းတစ်ခန်းချင်းစီ ဝင်လည်လို့ရတယ်။ ကားပြခန်းထဲက နရံပေါ်ချိတ်ထားတဲ့ poster ကိုနှိပ်ရင် ကားအကြောင်းကြည့်ပြီး <b>OPEN MOVIE</b> နဲ့ ဆက်သွားလို့ရတယ်နော်။</div>';$('modal').style.display='flex'}
 function closeModal(){$('modal').style.display='none'}function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}function toast(t){$('toast').textContent=t;$('toast').classList.add('show');setTimeout(()=>$('toast').classList.remove('show'),1800)}
-if(!INIT){toast('Telegram ထဲကနေ Museum ကိုဖွင့်ပါ')}
+checkMuseumAccess();
 </script>
 </body></html>'''
 
@@ -5061,15 +5049,6 @@ async def main():
         daemon=True,
         name="movie-http-server",
     ).start()
-
-    # Load local data only after the port is already listening. GitHub
-    # movie restoration is started by load_movies() in the background.
-    print("Startup data load: beginning")
-    migrate_old_data()
-    load_movies()
-    load_ai_usage()
-    load_admin_stats()
-    print("Startup data load: complete")
 
     application = (
         Application

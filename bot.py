@@ -3302,9 +3302,28 @@ MUSEUM_HTML = r'''<!doctype html>
 <div id="lock" class="lock hidden"><div class="card"><h1>MEMBERS ONLY</h1><p>Movie Myanmar Channel ကို Join လုပ်ပြီးမှ Museum ထဲဝင်လို့ရမယ်နော် 😝</p><button onclick="joinChannel()">JOIN CHANNEL</button></div></div>
 <div id="modal" class="modal hidden"><div class="card"><button class="close" onclick="closeModal()">✕</button><div id="modalBody"></div></div></div>
 <script>
-const tg=window.Telegram?.WebApp;if(tg){tg.ready();tg.expand()}const MAIN_CHANNEL='https://t.me/moviemyanmar567';
-function getInitData(){return (window.Telegram?.WebApp?.initData||'').trim()}
-async function api(path){const init=getInitData();const sep=path.includes('?')?'&':'?';const url=path+sep+'initData='+encodeURIComponent(init);const headers={};if(init)headers['X-Telegram-Init-Data']=init;const r=await fetch(url,{headers,cache:'no-store'});let d={};try{d=await r.json()}catch(e){};return d}
+let tg=window.Telegram?.WebApp||null;
+const MAIN_CHANNEL='https://t.me/moviemyanmar567';
+function refreshTelegram(){
+  tg=window.Telegram?.WebApp||tg;
+  try{tg?.ready();tg?.expand()}catch(e){}
+  return tg;
+}
+function getInitData(){
+  refreshTelegram();
+  return String(tg?.initData||'').trim();
+}
+async function api(path){
+  const init=getInitData();
+  const sep=path.includes('?')?'&':'?';
+  const url=path+sep+'initData='+encodeURIComponent(init);
+  const headers={'Cache-Control':'no-cache'};
+  if(init)headers['X-Telegram-Init-Data']=init;
+  const r=await fetch(url,{headers,cache:'no-store'});
+  let d={};
+  try{d=await r.json()}catch(e){}
+  return d;
+}
 const esc=s=>String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));
 let scene,camera,renderer,clock,player,playerGroup,character='boy',started=false,authorized=false,keysDown={},touchMove={x:0,y:0},lookState={active:false,x:0,y:0};let yaw=0,pitch=0;let currentRoom='MAIN LOBBY';let interactables=[];let movies=[];
 const roomDefs={
@@ -3346,17 +3365,51 @@ function interact(){let it=nearestInteract();if(it){it.action();return}let door=
 function move(dt){let x=touchMove.x,y=touchMove.y;if(keysDown['w']||keysDown['ArrowUp'])y=-1;if(keysDown['s']||keysDown['ArrowDown'])y=1;if(keysDown['a']||keysDown['ArrowLeft'])x=-1;if(keysDown['d']||keysDown['ArrowRight'])x=1;let len=Math.hypot(x,y);if(len<.05)return;x/=Math.max(1,len);y/=Math.max(1,len);let speed=5.2*dt;playerGroup.position.x+=Math.sin(yaw)*(-y)*speed+Math.cos(yaw)*x*speed;playerGroup.position.z+=Math.cos(yaw)*(-y)*speed-Math.sin(yaw)*x*speed;let d=roomDefs[currentRoom];let pad=1.3;playerGroup.position.x=Math.max(d.x-d.w/2+pad,Math.min(d.x+d.w/2-pad,playerGroup.position.x));playerGroup.position.z=Math.max(d.z-d.d/2+pad,Math.min(d.z+d.d/2-pad,playerGroup.position.z));player.rotation.y=Math.atan2(x,-y)*.15}
 function updatePrompt(){let it=nearestInteract();let door=checkDoor();let p=document.getElementById('prompt');if(it){p.textContent='TAP TO VIEW • '+it.name;p.style.display='block'}else if(door){p.textContent='TAP TO ENTER • '+door[0];p.style.display='block'}else p.style.display='none'}
 function animate(){requestAnimationFrame(animate);if(!started)return;let dt=Math.min(clock.getDelta(),.05);move(dt);camera.position.lerp(new THREE.Vector3(playerGroup.position.x+Math.sin(yaw)*5.8,2.25+pitch*.3,playerGroup.position.z+Math.cos(yaw)*5.8),.13);camera.lookAt(playerGroup.position.x,1.5+pitch*.25,playerGroup.position.z);updatePrompt();renderer.render(scene,camera)}
-async function enterMuseum(ch){character=ch;document.getElementById('welcome').classList.add('hidden');try{let a=null;for(let i=0;i<8;i++){const init=getInitData();if(init){a=await api('/api/auth');if(a.authorized)break;if(a.reason==='not_member')break}await new Promise(r=>setTimeout(r,350))}if(!a||!a.authorized){document.getElementById('lock').classList.remove('hidden');return}authorized=true;started=true;document.getElementById('lock').classList.add('hidden');init3D();watchMembership()}catch(e){document.getElementById('lock').classList.remove('hidden')}}
+async function enterMuseum(ch){
+  character=ch;
+  document.getElementById('welcome').classList.add('hidden');
+  document.getElementById('lock').classList.add('hidden');
+  try{
+    let a=null;
+    for(let i=0;i<20;i++){
+      refreshTelegram();
+      const init=getInitData();
+      if(init){
+        a=await api('/api/auth');
+        if(a.authorized)break;
+        if(a.reason==='not_member')break;
+      }
+      await new Promise(r=>setTimeout(r,500));
+    }
+    if(!a||!a.authorized){
+      const msg=a?.reason==='not_member'
+        ?(a.message||'Movie Myanmar Channel ကို Join လုပ်ပြီးမှ Museum ထဲဝင်လို့ရမယ်နော် 😝')
+        :'Telegram ထဲကနေ Museum ကို ပြန်ဖွင့်ပါ။';
+      document.querySelector('#lock p').textContent=msg;
+      document.getElementById('lock').classList.remove('hidden');
+      return;
+    }
+    authorized=true;
+    started=true;
+    document.getElementById('lock').classList.add('hidden');
+    init3D();
+    watchMembership();
+  }catch(e){
+    document.querySelector('#lock p').textContent='Museum authentication error. Telegram ထဲကနေ ပြန်ဖွင့်ပြီး ထပ်စမ်းပါ။';
+    document.getElementById('lock').classList.remove('hidden');
+  }
+}
 function joinChannel(){if(tg?.openTelegramLink)tg.openTelegramLink(MAIN_CHANNEL);else location.href=MAIN_CHANNEL}
 function closeModal(){document.getElementById('modal').classList.add('hidden')}
 function watchMembership(){setInterval(async()=>{try{let a=await api('/api/auth');if(!a.authorized){authorized=false;started=false;document.getElementById('lock').classList.remove('hidden')}}catch(e){}},15000)}
 const joy=document.getElementById('joy'),stick=document.getElementById('stick');let joyId=null;joy.addEventListener('pointerdown',e=>{joyId=e.pointerId;joy.setPointerCapture(e.pointerId);joyMove(e)});joy.addEventListener('pointermove',e=>{if(e.pointerId===joyId)joyMove(e)});joy.addEventListener('pointerup',()=>{joyId=null;touchMove={x:0,y:0};stick.style.transform='translate(0,0)'});function joyMove(e){let r=joy.getBoundingClientRect(),cx=r.left+r.width/2,cy=r.top+r.height/2,dx=e.clientX-cx,dy=e.clientY-cy,max=r.width*.31,l=Math.min(max,Math.hypot(dx,dy)),a=Math.atan2(dy,dx);touchMove={x:Math.cos(a)*(l/max),y:Math.sin(a)*(l/max)};stick.style.transform=`translate(${Math.cos(a)*l}px,${Math.sin(a)*l}px)`}
 const look=document.getElementById('look');let lid=null;look.addEventListener('pointerdown',e=>{lid=e.pointerId;look.setPointerCapture(lid);lookState={active:true,x:e.clientX,y:e.clientY}});look.addEventListener('pointermove',e=>{if(e.pointerId!==lid)return;let dx=e.clientX-lookState.x,dy=e.clientY-lookState.y;lookState.x=e.clientX;lookState.y=e.clientY;yaw-=dx*.008;pitch=Math.max(-1,Math.min(1,pitch-dy*.004))});look.addEventListener('pointerup',()=>{lid=null;lookState.active=false});
 window.addEventListener('keydown',e=>{keysDown[e.key]=true;if(e.key==='e'||e.key==='E')interact()});window.addEventListener('keyup',e=>{keysDown[e.key]=false});renderer?.domElement?.addEventListener('dblclick',interact);window.addEventListener('resize',()=>{if(!camera||!renderer)return;camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});
-// Wait for Telegram WebApp initData until the user chooses a character.
-// Do not run an auth check on page load: Telegram can populate initData
-// a moment after the WebApp HTML is first displayed.
-if(window.Telegram?.WebApp){window.Telegram.WebApp.ready();window.Telegram.WebApp.expand();}
+// Initialize Telegram without authenticating on page load.
+// The signed initData can arrive shortly after the WebApp HTML is displayed.
+refreshTelegram();
+setTimeout(refreshTelegram,500);
+setTimeout(refreshTelegram,1500);
 </script></body></html>'''
 
 

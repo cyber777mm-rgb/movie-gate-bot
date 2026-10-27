@@ -902,21 +902,64 @@ def load_movies():
 
 
 def save_movies():
+    """Persist the complete movie database locally AND durably.
+
+    Render Free local files can disappear after sleep/restart/redeploy, so an
+    upload is not considered durably saved until the GitHub backup succeeds.
+    This function always writes the FULL merged list; it never truncates the
+    database and has no movie-count limit.
+    """
     with movie_lock:
-        snapshot = list(
-            movie_database
+        snapshot = list(movie_database)
+
+    # Fast local copy for the currently running process.
+    save_json(MOVIE_DB_FILE, snapshot)
+
+    if not github_enabled():
+        print(
+            "WARNING: GitHub movie backup is OFF. "
+            "Set GITHUB_TOKEN/GITHUB_REPO/GITHUB_MOVIE_FILE on Render "
+            "or new movies cannot survive an ephemeral filesystem reset."
         )
+        return False
 
-    # Local save happens immediately so the current process never
-    # depends on GitHub being reachable.
-    save_json(
-        MOVIE_DB_FILE,
-        snapshot,
+    # IMPORTANT: do this synchronously.  The old daemon background thread
+    # could be killed when Render slept/restarted before the new movie reached
+    # GitHub, which is exactly how a freshly uploaded movie could disappear.
+    # Merge the newest remote copy with RAM before every attempt so an older
+    # snapshot can never erase an existing movie.
+    for attempt in range(1, 4):
+        try:
+            remote_movies, _ = github_get_movies()
+            if not isinstance(remote_movies, list):
+                remote_movies = []
+
+            durable = merge_movie_lists(remote_movies, snapshot)
+
+            if github_put_movies(durable):
+                # Keep local/RAM in sync with the durable union as well.
+                with movie_lock:
+                    movie_database[:] = durable
+                save_json(MOVIE_DB_FILE, durable)
+                print(
+                    "Durable movie save OK:",
+                    len(durable),
+                    "movies (attempt",
+                    attempt,
+                    ")",
+                )
+                return True
+        except Exception as e:
+            print("Durable movie save attempt failed:", attempt, e)
+
+        if attempt < 3:
+            time.sleep(1.0 * attempt)
+
+    print(
+        "CRITICAL: movie is saved locally but GitHub durable backup failed. "
+        "Check GITHUB_TOKEN/repository permissions before Render sleeps."
     )
-
-    # Durable backup happens in the background so a Telegram channel
-    # post is not delayed by GitHub network latency.
-    github_background_save(snapshot)
+    return False
 
 
 def load_ai_usage():
@@ -1780,11 +1823,17 @@ def authorize_webapp_request(headers, qs):
     if not uid:
         return False, None, "invalid_init_data"
 
+    # Owner/Admin bypasses the public-channel membership gate everywhere,
+    # including the Mini App APIs.
+    if is_admin_user(uid):
+        record_user(uid)
+        return True, uid, "admin"
+
     if not telegram_get_chat_member_sync(uid):
         return False, uid, "not_member"
 
     record_user(uid)
-    return True, uid, "admin" if is_admin_user(uid) else "ok"
+    return True, uid, "ok"
 
 
 async def stop_carousel(chat_id):
@@ -3260,13 +3309,13 @@ async def channel_post_handler(update, context):
 
 MINI_APP_HTML = r'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"><meta name="theme-color" content="#03101a"><title>Movie Myanmar • Premium Cinema</title><script src="https://telegram.org/js/telegram-web-app.js"></script><style>
-:root{--bg:#03101a;--cyan:#59eaff;--muted:#8eafbd;--line:#29d9ff55}*{box-sizing:border-box}html,body{margin:0;background:#02080e;color:#f3fbff;font-family:Inter,system-ui,Arial,sans-serif}body{background:radial-gradient(circle at 50% -10%,#0c4b67,#03101a 42%,#02080e 100%)}button,input{font:inherit}button{cursor:pointer}.app{width:100%;min-height:100vh;padding-bottom:88px}.topbar{position:sticky;top:0;z-index:20;padding:14px 16px 11px;background:linear-gradient(#03101af2,#03101ad9,#03101a00);backdrop-filter:blur(14px)}.brand{font-size:17px;font-weight:950;letter-spacing:2px}.brand span{color:var(--cyan);text-shadow:0 0 22px #59eaff77}.sub{margin-top:3px;color:#91b7c6;font-size:9px;letter-spacing:2px;text-transform:uppercase}.hero{margin:2px 12px 18px;position:relative;min-height:450px;border-radius:28px;overflow:hidden;border:1px solid var(--line);background:#071923;box-shadow:0 18px 60px #0009}.hero-bg{position:absolute;inset:0;background-size:cover;background-position:center;opacity:.76}.hero:after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,#03101a18 25%,#03101a55 55%,#03101af5 100%)}.hero-content{position:relative;z-index:2;min-height:450px;padding:22px 20px;display:flex;flex-direction:column;justify-content:flex-end}.eyebrow{font-size:9px;letter-spacing:3px;color:var(--cyan);font-weight:900}.hero h1{font-size:31px;line-height:1.05;margin:7px 0 8px}.meta{color:#c3dce6;font-size:11px}.hero p{font-size:11px;line-height:1.6;color:#a9c4ce;max-width:92%;margin:10px 0 14px}.actions{display:flex;gap:9px}.primary,.ghost{border-radius:14px;padding:12px 17px;font-size:11px;font-weight:900;border:1px solid var(--line)}.primary{background:linear-gradient(135deg,#6cf0ff,#309fff);color:#02101a}.ghost{background:#061b28bb;color:#fff}.section{margin:0 0 23px}.section-head{display:flex;justify-content:space-between;align-items:end;padding:0 15px 10px}.section-title{font-size:17px;font-weight:950}.section-sub{font-size:9px;color:var(--muted);letter-spacing:1px;text-transform:uppercase}.rail{display:flex;gap:11px;overflow-x:auto;padding:2px 15px 8px}.rail::-webkit-scrollbar{display:none}.card{flex:0 0 152px;border-radius:18px;overflow:hidden;background:linear-gradient(180deg,#0a2939,#061722);border:1px solid #36dfff2e;box-shadow:0 12px 30px #0007}.poster{width:100%;height:226px;object-fit:cover;display:block;background:#092637}.card-body{padding:9px 10px 11px}.card-title{font-size:11px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.card-meta{margin-top:5px;font-size:9px;color:#8fb4c2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.badge{display:inline-block;margin-top:7px;border:1px solid #55eaff55;color:#76edff;background:#0b3544aa;border-radius:999px;padding:3px 7px;font-size:8px;font-weight:900}.genres{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:0 15px}.genre{min-height:76px;text-align:left;padding:13px;border-radius:18px;border:1px solid #3cdfff33;background:linear-gradient(135deg,#0a2938cc,#061520dd);color:#eafaff}.genre b{display:block;font-size:13px}.genre span{display:block;margin-top:6px;color:#7fa9b7;font-size:9px}.searchbar{display:flex;gap:8px;padding:0 15px;margin-bottom:12px}.searchbar input{min-width:0;flex:1;background:#061b28;border:1px solid #39ddff44;color:#fff;border-radius:14px;padding:12px 13px;outline:none}.searchbar button{width:45px;border:0;border-radius:14px;background:#44dfff;color:#03101a;font-weight:950}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px;padding:0 15px}.grid .card{min-width:0;width:100%}.grid .poster{height:255px}.empty{padding:30px 15px;text-align:center;color:#7595a2;font-size:11px}.bottom{position:fixed;z-index:30;left:0;right:0;bottom:0;padding:8px 12px calc(8px + env(safe-area-inset-bottom));background:#03101ae8;border-top:1px solid #39dcff25;backdrop-filter:blur(18px);display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.nav{border:0;background:transparent;color:#7395a3;padding:6px 2px;font-size:9px}.nav.active{color:var(--cyan)}.nav .ico{display:block;font-size:17px;margin-bottom:2px}.view{display:none}.view.active{display:block}.splash,.gate{position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 50% 20%,#0c5775,#03101a 52%,#02070b);padding:25px}.splash-card{width:min(390px,100%);text-align:center;padding:34px 22px;border:1px solid #54eaff55;border-radius:28px;background:#06202dcc;box-shadow:0 25px 90px #0009;backdrop-filter:blur(20px)}.splash-logo{font-size:26px;font-weight:950;letter-spacing:3px}.splash-logo span{color:var(--cyan)}.splash-sub{font-size:9px;color:#84aebb;letter-spacing:2px;margin-top:6px}.spinner{width:32px;height:32px;border:2px solid #ffffff18;border-top-color:var(--cyan);border-radius:50%;margin:25px auto 15px;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.splash-text{font-size:11px;color:#a9c6d1;line-height:1.6}.gate-buttons{display:grid;gap:9px;margin-top:20px}.gate-buttons button{border:1px solid #48e5ff55;border-radius:14px;padding:12px;background:#0b2d3d;color:#eaffff;font-weight:900}.gate-buttons .secondary{background:#071720}.modal{position:fixed;inset:0;z-index:90;background:#020a10ee;display:none;align-items:flex-end}.modal.open{display:flex}.sheet{width:100%;max-height:90vh;overflow:auto;border-radius:28px 28px 0 0;background:linear-gradient(180deg,#082536,#031019);border:1px solid #49e6ff44;padding:16px}.sheet img{width:100%;max-height:360px;object-fit:cover;border-radius:19px}.close{float:right;width:34px;height:34px;border-radius:50%;border:1px solid #58eaff55;background:#03131c;color:#fff}.sheet h2{font-size:22px;margin:15px 0 6px}.sheet p{font-size:11px;color:#9dbbc5;line-height:1.7}
+:root{--bg:#03101a;--cyan:#59eaff;--muted:#8eafbd;--line:#29d9ff55}*{box-sizing:border-box}html,body{margin:0;background:#02080e;color:#f3fbff;font-family:Inter,system-ui,Arial,sans-serif}body{background:radial-gradient(circle at 50% -10%,#0c4b67,#03101a 42%,#02080e 100%)}button,input{font:inherit}button{cursor:pointer}.app{width:100%;min-height:100vh;padding-bottom:88px}.topbar{position:sticky;top:0;z-index:20;padding:14px 16px 11px;background:linear-gradient(#03101af2,#03101ad9,#03101a00);backdrop-filter:blur(14px)}.brand{font-size:17px;font-weight:950;letter-spacing:2px}.brand span{color:var(--cyan);text-shadow:0 0 22px #59eaff77}.sub{margin-top:3px;color:#91b7c6;font-size:9px;letter-spacing:2px;text-transform:uppercase}.hero{margin:2px 12px 18px;position:relative;min-height:450px;border-radius:28px;overflow:hidden;border:1px solid var(--line);background:#071923;box-shadow:0 18px 60px #0009}.hero-bg{position:absolute;inset:0;background-size:cover;background-position:center;opacity:.76}.hero:after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,#03101a18 25%,#03101a55 55%,#03101af5 100%)}.hero-content{position:relative;z-index:2;min-height:450px;padding:22px 20px;display:flex;flex-direction:column;justify-content:flex-end}.eyebrow{font-size:9px;letter-spacing:3px;color:var(--cyan);font-weight:900}.hero h1{font-size:31px;line-height:1.05;margin:7px 0 8px}.meta{color:#c3dce6;font-size:11px}.hero p{font-size:11px;line-height:1.6;color:#a9c4ce;max-width:92%;margin:10px 0 14px}.actions{display:flex;gap:9px}.primary,.ghost{border-radius:14px;padding:12px 17px;font-size:11px;font-weight:900;border:1px solid var(--line)}.primary{background:linear-gradient(135deg,#6cf0ff,#309fff);color:#02101a}.ghost{background:#061b28bb;color:#fff}.section{margin:0 0 23px}.section-head{display:flex;justify-content:space-between;align-items:end;padding:0 15px 10px}.section-title{font-size:17px;font-weight:950}.section-sub{font-size:9px;color:var(--muted);letter-spacing:1px;text-transform:uppercase}.rail{display:flex;gap:11px;overflow-x:auto;padding:2px 15px 8px}.rail::-webkit-scrollbar{display:none}.card{flex:0 0 152px;border-radius:18px;overflow:hidden;background:linear-gradient(180deg,#0a2939,#061722);border:1px solid #36dfff2e;box-shadow:0 12px 30px #0007}.poster{width:100%;height:226px;object-fit:cover;display:block;background:#092637}.card-body{padding:9px 10px 11px}.card-title{font-size:11px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.card-meta{margin-top:5px;font-size:9px;color:#8fb4c2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.badge{display:inline-block;margin-top:7px;border:1px solid #55eaff55;color:#76edff;background:#0b3544aa;border-radius:999px;padding:3px 7px;font-size:8px;font-weight:900}.genres{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:0 15px}.genre{min-height:76px;text-align:left;padding:13px;border-radius:18px;border:1px solid #3cdfff33;background:linear-gradient(135deg,#0a2938cc,#061520dd);color:#eafaff}.genre b{display:block;font-size:13px}.genre span{display:block;margin-top:6px;color:#7fa9b7;font-size:9px}.searchbar{display:flex;gap:8px;padding:0 15px;margin-bottom:12px}.searchbar input{min-width:0;flex:1;background:#061b28;border:1px solid #39ddff44;color:#fff;border-radius:14px;padding:12px 13px;outline:none}.searchbar button{width:45px;border:0;border-radius:14px;background:#44dfff;color:#03101a;font-weight:950}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px;padding:0 15px}.grid .card{min-width:0;width:100%}.grid .poster{height:255px}.empty{padding:30px 15px;text-align:center;color:#7595a2;font-size:11px}.bottom{position:fixed;z-index:30;left:0;right:0;bottom:0;padding:8px 12px calc(8px + env(safe-area-inset-bottom));background:#03101ae8;border-top:1px solid #39dcff25;backdrop-filter:blur(18px);display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.nav{border:0;background:transparent;color:#7395a3;padding:6px 2px;font-size:9px}.nav.active{color:var(--cyan)}.nav .ico{display:block;font-size:17px;margin-bottom:2px}.view{display:none}.view.active{display:block}.splash,.gate{position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 50% 20%,#0c5775,#03101a 52%,#02070b);padding:25px}.splash-card{width:min(390px,100%);text-align:center;padding:34px 22px;border:1px solid #54eaff55;border-radius:28px;background:#06202dcc;box-shadow:0 25px 90px #0009;backdrop-filter:blur(20px)}.splash-logo{font-size:26px;font-weight:950;letter-spacing:3px}.splash-logo span{color:var(--cyan)}.splash-sub{font-size:9px;color:#84aebb;letter-spacing:2px;margin-top:6px}.spinner{width:32px;height:32px;border:2px solid #ffffff18;border-top-color:var(--cyan);border-radius:50%;margin:25px auto 15px;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.splash-text{font-size:11px;color:#a9c6d1;line-height:1.6}.gate-buttons{display:grid;gap:9px;margin-top:20px}.gate-buttons button{border:1px solid #48e5ff55;border-radius:14px;padding:12px;background:#0b2d3d;color:#eaffff;font-weight:900}.gate-buttons .secondary{background:#071720}.modal{position:fixed;inset:0;z-index:90;background:#020a10ee;display:none;align-items:flex-end}.modal.open{display:flex}.sheet{width:100%;max-height:90vh;overflow:auto;border-radius:28px 28px 0 0;background:linear-gradient(180deg,#082536,#031019);border:1px solid #49e6ff44;padding:16px}.sheet img{width:100%;max-height:360px;object-fit:cover;border-radius:19px}.close{float:right;width:34px;height:34px;border-radius:50%;border:1px solid #58eaff55;background:#03131c;color:#fff}.sheet h2{font-size:22px;margin:15px 0 6px}.sheet p{font-size:11px;color:#9dbbc5;line-height:1.7}.creator-credit{margin:4px 15px 22px;padding:12px;text-align:center;border-top:1px solid #39dcff22;color:#6f929f;font-size:9px;letter-spacing:.8px}.creator-credit b{color:#9eddeb}
 @media(min-width:700px){.app{max-width:720px;margin:auto}.grid{grid-template-columns:repeat(4,1fr)}.grid .poster{height:300px}.hero,.hero-content{min-height:520px}.bottom{max-width:720px;margin:auto}}
 </style></head><body>
 <div id="splash" class="splash"><div class="splash-card"><div class="splash-logo">MOVIE <span>MYANMAR</span></div><div class="splash-sub">Xiao Yu CyB • PREMIUM CINEMA</div><div class="spinner"></div><div id="splashText" class="splash-text">Connecting to Cinema...</div></div></div>
 <div id="gate" class="gate" style="display:none"><div class="splash-card"><div class="splash-logo">MOVIE <span>MYANMAR</span></div><div class="splash-sub">MEMBERS ONLY CINEMA</div><div id="gateText" class="splash-text" style="margin-top:18px">Channel ကို Join ပြီးမှ Movie Myanmar သုံးလို့ရမယ်နော် 😝</div><div class="gate-buttons"><button onclick="joinChannel()">🎬 Join Movie Myanmar</button><button class="secondary" onclick="checkAccess()">✅ I Joined</button></div></div></div>
 <div id="appRoot" class="app" style="display:none"><header class="topbar"><div class="brand">MOVIE <span>MYANMAR</span></div><div class="sub">Xiao Yu CyB • Premium Cinema</div></header><main>
-<section id="homeView" class="view active"><div id="hero" class="hero"></div><div class="section"><div class="section-head"><div class="section-title">🔥 NOW SHOWING</div><div class="section-sub">Swipe</div></div><div id="latestRail" class="rail"></div></div><div class="section"><div class="section-head"><div class="section-title">🎬 LATEST MOVIES</div><div class="section-sub">New releases</div></div><div id="latestGrid" class="grid"></div></div><div class="section"><div class="section-head"><div class="section-title">⚡ TRENDING</div><div class="section-sub">Popular now</div></div><div id="trendingRail" class="rail"></div></div><div class="section"><div class="section-head"><div class="section-title">🎭 GENRES</div><div class="section-sub">Explore</div></div><div id="genres" class="genres"></div></div><div class="section"><div class="section-head"><div class="section-title">⚡ XIAO YU AI</div></div><div style="margin:0 15px;padding:18px;border-radius:20px;border:1px solid #43ddff38;background:linear-gradient(135deg,#092c3d,#06151e)"><div style="font-weight:900;font-size:14px">Find your next movie.</div><div style="color:#88aebc;font-size:10px;line-height:1.6;margin:6px 0 12px">Search the Movie Myanmar collection with Xiao Yu.</div><button class="primary" onclick="openAI()">🤖 ASK XIAO YU</button></div></div></section>
+<section id="homeView" class="view active"><div id="hero" class="hero"></div><div class="section"><div class="section-head"><div class="section-title">🔥 NOW SHOWING</div><div class="section-sub">Swipe</div></div><div id="latestRail" class="rail"></div></div><div class="section"><div class="section-head"><div class="section-title">🎬 LATEST MOVIES</div><div class="section-sub">New releases</div></div><div id="latestGrid" class="grid"></div></div><div class="section"><div class="section-head"><div class="section-title">⚡ TRENDING</div><div class="section-sub">Popular now</div></div><div id="trendingRail" class="rail"></div></div><div class="section"><div class="section-head"><div class="section-title">🎭 GENRES</div><div class="section-sub">Explore</div></div><div id="genres" class="genres"></div></div><div class="section"><div class="section-head"><div class="section-title">⚡ XIAO YU AI</div></div><div style="margin:0 15px;padding:18px;border-radius:20px;border:1px solid #43ddff38;background:linear-gradient(135deg,#092c3d,#06151e)"><div style="font-weight:900;font-size:14px">Find your next movie.</div><div style="color:#88aebc;font-size:10px;line-height:1.6;margin:6px 0 12px">Search the Movie Myanmar collection with Xiao Yu.</div><button class="primary" onclick="openAI()">🤖 ASK XIAO YU</button></div></div><div class="creator-credit">Designed &amp; Developed by <b>CyB Lin Myat</b></div></section>
 <section id="moviesView" class="view"><div class="section-head"><div class="section-title" id="viewTitle">MOVIES</div><div class="section-sub" id="viewCount"></div></div><div class="searchbar"><input id="searchInput" placeholder="Search movie name..." onkeydown="if(event.key==='Enter')doSearch()"><button onclick="doSearch()">⌕</button></div><div id="results" class="grid"></div></section>
 <section id="aiView" class="view"><div class="section-head"><div class="section-title">🤖 XIAO YU AI</div></div><div style="margin:0 15px;padding:18px;border-radius:20px;border:1px solid #43ddff38;background:#061b27"><div id="aiText" style="font-size:11px;color:#a9c4ce;line-height:1.7">Movie နာမည်၊ genre ဒါမှမဟုတ် mood ရေးပေးနော် 😝</div><div class="searchbar" style="padding:0;margin-top:14px"><input id="aiInput" placeholder="ဥပမာ — action ကားကောင်းကောင်း"><button onclick="askAI()">➤</button></div></div></section></main>
 <nav class="bottom"><button class="nav active" onclick="showView('home')"><span class="ico">⌂</span>HOME</button><button class="nav" onclick="openAll()"><span class="ico">◉</span>MOVIES</button><button class="nav" onclick="showView('ai')"><span class="ico">✦</span>XIAO YU</button><button class="nav" onclick="scrollGenres()"><span class="ico">▦</span>GENRES</button></nav></div>

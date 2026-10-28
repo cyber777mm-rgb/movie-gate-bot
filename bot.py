@@ -240,13 +240,16 @@ def uploader_keyboard():
 # IMPORTANT: Keep the repository PRIVATE if movie records contain
 # private Telegram storage links/file IDs.
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
+# Use the main code repository by default so the movie backup does not
+# depend on a second data repository that may not exist.  You can still
+# override both values in Render Environment Variables.
 GITHUB_REPO = os.getenv(
     "GITHUB_REPO",
-    "cyber777mm-rgb/movie-myanmar-data",
+    "cyber777mm-rgb/movie-gate-bot",
 ).strip().strip("/")
 GITHUB_MOVIE_FILE = os.getenv(
     "GITHUB_MOVIE_FILE",
-    "movies.json",
+    "data/movies.json",
 ).strip().lstrip("/")
 GITHUB_BRANCH = os.getenv(
     "GITHUB_BRANCH",
@@ -2745,7 +2748,13 @@ async def publish_upload(update, context):
             raise RuntimeError("Could not build movie record from published album")
 
         movie["storage_channel"] = str(storage_id)
-        save_movie_record(movie)
+        durable_ok = save_movie_record(movie)
+        if not durable_ok:
+            raise RuntimeError(
+                "Movie was published to the private storage channel, "
+                "but the durable movie database backup failed. "
+                "Check GITHUB_TOKEN/GITHUB_REPO/GITHUB_MOVIE_FILE in Render."
+            )
 
         group_id = str(
             getattr(sent[0], "media_group_id", "") or ""
@@ -3147,11 +3156,18 @@ def movie_already_saved(movie):
 
 
 def save_movie_record(movie):
+    """Add/update one movie and require a durable backup.
+
+    Return True only when the complete database was successfully written to
+    the durable backup.  This prevents the uploader from telling the owner
+    that a movie was added to the Mini App when Render has only kept it in
+    ephemeral RAM/disk.
+    """
     if not movie:
         return False
 
-    replaced = False
     with movie_lock:
+        replaced = False
         for i, old in enumerate(movie_database):
             same = (
                 str(old.get("id", ""))
@@ -3172,9 +3188,30 @@ def save_movie_record(movie):
         if not replaced:
             movie_database.append(movie)
 
-    save_movies()
-    invalidate_carousel()
-    return not replaced
+    durable_ok = save_movies()
+
+    if durable_ok:
+        invalidate_carousel()
+        print(
+            "Movie record durable-save OK:",
+            movie.get("title"),
+            "Total:",
+            len(movie_database),
+            "Replaced:" if replaced else "Added:",
+            replaced,
+        )
+        return True
+
+    # Do not leave a false success state in the in-memory carousel.
+    # The storage-channel post still exists, so the handler can retry the
+    # record save when Telegram delivers/updates the channel post.
+    print(
+        "Movie record durable-save FAILED:",
+        movie.get("title"),
+        "Total in RAM/local:",
+        len(movie_database),
+    )
+    return False
 
 
 async def save_album_as_movie(messages, caption=None):
@@ -4376,6 +4413,13 @@ async def main():
         "GitHub Movie Backup:",
         "ON" if github_enabled() else "OFF (set GITHUB_TOKEN)",
     )
+
+    if not github_enabled():
+        print(
+            "CRITICAL: durable movie backup is OFF. "
+            "New movies cannot survive a Render filesystem reset until "
+            "GITHUB_TOKEN is configured."
+        )
 
     if github_enabled():
         print(
